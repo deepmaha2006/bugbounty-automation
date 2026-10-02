@@ -1,13 +1,13 @@
 ﻿<div align="center">
 
-`
+<pre>
 ██╗  ██╗██╗   ██╗██████╗ ██████╗  █████╗ ██╗  ██╗
 ██║  ██║╚██╗ ██╔╝██╔══██╗██╔══██╗██╔══██╗╚██╗██╔╝
 ███████║ ╚████╔╝ ██║  ██║██████╔╝███████║ ╚███╔╝ 
 ██╔══██║  ╚██╔╝  ██║  ██║██╔══██╗██╔══██║ ██╔██╗ 
 ██║  ██║   ██║   ██████╔╝██║  ██║██║  ██║██╔╝ ██╗
 ╚═╝  ╚═╝   ╚═╝   ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
-`
+</pre>
 
 **Enterprise Bug Bounty Automation Platform**
 
@@ -94,18 +94,18 @@ HydraX is purpose-built to accelerate the recon-to-report cycle in authorized bu
 │  │ main_window.py      │      │ GET  /api/findings/       │  │
 │  │ views/ (dashboard,  │      │ GET  /api/reports/        │  │
 │  │ scanner, results,   │      │ SSE  /api/events/         │  │
-│  │ reports, settings)  │      │ POST /api/brain/resolve    │  │
+│  │ reports, settings)  │      │ POST /api/brain/resolve   │  │
 │  └──────────┬──────────┘      └─────────────┬─────────────┘  │
 │             │                               │                │
 ├─────────────┴───────────────────────────────┴────────────────┤
-│                       Shared Core Layer                       │
+│                       Shared Core Layer                      │
 │                                                              │
-│  ┌────────┐  ┌──────────┐  ┌────────┐  ┌──────────┐         │
-│  │ core/  │  │scanners/ │  │ utils/ │  │ config/  │         │
-│  │ engine │  │ 11 mods  │  │crawler │  │ profiles │         │
-│  │context │  │ parallel │  │reporter│  │remediation KB │   │
-│  │storage │  │execution │  │payloads│  │scope enforcement│  │
-│  └────────┘  └──────────┘  └────────┘  └──────────┘         │
+│  ┌────────┐  ┌──────────┐  ┌────────┐  ┌─────────────────┐   │
+│  │ core/  │  │scanners/ │  │ utils/ │  │ config/         |   │
+│  │ engine │  │ 11 mods  │  │crawler │  │ profiles        |   │
+│  │context │  │ parallel │  │reporter│  │remediation KB   │   │
+│  │storage │  │execution │  │payloads│  │scope enforcement│   │
+│  └────────┘  └──────────┘  └────────┘  └─────────────────┘   │
 │                                                              │
 ├──────────────────────────────────────────────────────────────┤
 │                    Infrastructure Layer                      │
