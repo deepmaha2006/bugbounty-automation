@@ -82,56 +82,62 @@ HydraX is purpose-built to accelerate the recon-to-report cycle in authorized bu
 
 ## 🏗️ Architecture
 
-`
-┌─────────────────────────────────────────────────────────────────┐
-│                        HydraX Platform                          │
-├─────────────────────────┬───────────────────────────────────────┤
-│   Desktop Client (GUI)  │         API Server (FastAPI)          │
-│   ─────────────────     │   ─────────────────────────────────   │
-│   CustomTkinter UI      │   POST /api/scans/                    │
-│   main_window.py        │   GET  /api/findings/                 │
-│   views/ (dashboard,    │   GET  /api/reports/                  │
-│   scanner, results,     │   SSE  /api/events/                   │
-│   reports, settings)    │   POST /api/brain/resolve             │
-├─────────────────────────┴───────────────────────────────────────┤
-│                    Shared Core Layer                             │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────────┐  │
-│  │ core/    │ │scanners/ │ │ utils/   │ │ config/           │  │
-│  │ engine   │ │ 11 mods  │ │ crawler  │ │ profiles (YAML)   │  │
-│  │ context  │ │ parallel │ │ reporter │ │ remediation KB    │  │
-│  │ storage  │ │ execution│ │ payloads │ │ scope enforcement │  │
-│  └──────────┘ └──────────┘ └──────────┘ └───────────────────┘  │
-├─────────────────────────────────────────────────────────────────┤
-│              Infrastructure Layer                                │
-│        PostgreSQL (multi-tenant)  ·  Redis  ·  Celery           │
-│        Docker Compose  ·  Nginx (optional reverse proxy)        │
-└─────────────────────────────────────────────────────────────────┘
-`
+```text
+┌──────────────────────────────────────────────────────────────┐
+│                       HydraX Platform                        │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌─────────────────────┐      ┌───────────────────────────┐  │
+│  │ Desktop Client (GUI)│      │     API Server (FastAPI)  │  │
+│  │                     │      │                           │  │
+│  │ CustomTkinter UI    │      │ POST /api/scans/          │  │
+│  │ main_window.py      │      │ GET  /api/findings/       │  │
+│  │ views/ (dashboard,  │      │ GET  /api/reports/        │  │
+│  │ scanner, results,   │      │ SSE  /api/events/         │  │
+│  │ reports, settings)  │      │ POST /api/brain/resolve    │  │
+│  └──────────┬──────────┘      └─────────────┬─────────────┘  │
+│             │                               │                │
+├─────────────┴───────────────────────────────┴────────────────┤
+│                       Shared Core Layer                       │
+│                                                              │
+│  ┌────────┐  ┌──────────┐  ┌────────┐  ┌──────────┐         │
+│  │ core/  │  │scanners/ │  │ utils/ │  │ config/  │         │
+│  │ engine │  │ 11 mods  │  │crawler │  │ profiles │         │
+│  │context │  │ parallel │  │reporter│  │remediation KB │   │
+│  │storage │  │execution │  │payloads│  │scope enforcement│  │
+│  └────────┘  └──────────┘  └────────┘  └──────────┘         │
+│                                                              │
+├──────────────────────────────────────────────────────────────┤
+│                    Infrastructure Layer                      │
+│                                                              │
+│          PostgreSQL (multi-tenant) · Redis · Celery          │
+│                                                              │
+│             Docker Compose · Nginx (optional)                │
+└──────────────────────────────────────────────────────────────┘
+```
 
-### Data Flow
+### 🔄 Data Flow
 
-`
+```text
 1. Target URL submitted (GUI or API)
-        │
-        ▼
-2. URLDiscovery (Playwright + BeautifulSoup)
+             │
+             ▼
+2. URL Discovery (Playwright + BeautifulSoup)
    → Crawls links, forms, parameters, endpoints
-        │
-        ▼
+             │
+             ▼
 3. ScanEngine.scan() → ScanContext created
    → Selected scanners dispatched in parallel threads
-        │
-        ▼
-4. Scanner Modules execute against attack surface
+             │
+             ▼
+4. Scanner modules execute against attack surface
    → Findings aggregated into ScanReport
-        │
-        ▼
+             │
+             ▼
 5. ScanReport persisted → HTML/JSON/SARIF generated
    → SSE events pushed to connected clients
    → Alerts fired if critical findings detected
-`
-
----
+```
 
 ## 🔬 Scanner Modules
 
