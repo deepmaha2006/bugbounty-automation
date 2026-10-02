@@ -1,0 +1,78 @@
+name: web-full
+description: Full web application scan with deep crawling and all scanners
+version: '1.0'
+tags:
+- web
+- comprehensive
+- default
+auth_ref: ''
+enabled_scanners:
+- xss
+- sqli
+- csrf
+- ssrf
+- clickjack
+disabled_scanners:
+- rce
+- file_upload
+- open_redirect
+- auth_session
+- business_logic
+- bac
+- sub_takeover
+- sec_misconfig
+- info_disclosure
+- cloud
+- ddos
+- recon
+- api
+- proto_pollution
+- xml
+- websocket
+- llm
+- mobile
+- cache
+- smuggling
+max_pages: 0
+max_depth: 0
+max_smart_probes: 0
+requests_per_second: 0.0
+burst_limit: 0
+follow_redirects: true
+respect_robots_txt: false
+crawl_sitemap: true
+crawl_js_routes: false
+verify_findings: true
+capture_screenshots: false
+custom_headers: {}
+custom_cookies: {}
+report_template: default
+export_formats:
+- html
+- json
+fail_on_severity: ''
+scope:
+  allowed_patterns:
+  - /**
+  denied_patterns:
+  - /logout
+  - /signout
+  - /delete*
+  - /reset*
+  - /unsubscribe*
+  allowed_domains: []
+  denied_domains: []
+  max_pages: 200
+  max_depth: 5
+  max_smart_probes: 500
+  requests_per_second: 10.0
+  burst_limit: 20
+  auth_ref: ''
+  follow_redirects: true
+  respect_robots_txt: false
+  crawl_sitemap: true
+  crawl_js_routes: true
+  enabled_scanners: []
+  disabled_scanners: []
+  custom_headers: {}
+  custom_cookies: {}

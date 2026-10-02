@@ -1,0 +1,69 @@
+# HydraX — example TLS-terminating reverse proxy config (spec §26).
+#
+# Not build/deploy-tested in this sandbox (no nginx available here) — verify
+# against your actual cert paths and hostname before production use. Adjust
+# `upstream` to wherever the app container/process actually listens
+# (docker-compose.yml's `app-prod` service on the `staging`/`prod` profiles
+# listens on 8000 inside the compose network; from the host, that's whatever
+# you've mapped it to).
+#
+# Why put TLS here rather than in the app itself: HYDRAX_HOST/HYDRAX_PORT
+# (webapp/config.py) and uvicorn have no TLS support wired in on purpose —
+# terminating TLS at a dedicated reverse proxy is the standard, better-
+# audited place for certificate handling, HSTS, and redirect-to-HTTPS logic,
+# not something to reimplement inside the application process.
+#
+# This config forwards X-Real-IP/X-Forwarded-For below (needed for accurate
+# rate-limiting and audit logging) — the app only trusts those headers from
+# a peer listed in HYDRAX_TRUSTED_PROXY_IPS (.env.example), so also set that
+# to this proxy's IP/CIDR on the app side, or every request will still
+# appear to share this proxy's own address (Phase 20 audit finding).
+
+upstream hydrax_app {
+    server 127.0.0.1:8000;
+}
+
+server {
+    listen 80;
+    server_name your-hydrax-hostname.example.com;
+    # Redirect everything to HTTPS — never serve the API or the frontend
+    # (which stores its JWT in localStorage) over plain HTTP.
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name your-hydrax-hostname.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/your-hydrax-hostname.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-hydrax-hostname.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+
+    # Server-Sent Events (webapp/routers/events.py) need buffering off and a
+    # long read timeout, or nginx will silently truncate/delay scan progress
+    # streams.
+    location /api/scans/ {
+        proxy_pass http://hydrax_app;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        proxy_pass http://hydrax_app;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

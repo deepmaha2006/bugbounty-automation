@@ -1,0 +1,59 @@
+name: auth-quick
+description: Quick authenticated scan for internal applications
+version: '1.0'
+tags:
+- auth
+- quick
+- internal
+auth_ref: ''
+enabled_scanners:
+- xss
+- sqli
+- bac
+- auth_session
+- business_logic
+- idor
+- csrf
+- file_upload
+- open_redirect
+disabled_scanners: []
+max_pages: 0
+max_depth: 0
+max_smart_probes: 0
+requests_per_second: 0.0
+burst_limit: 0
+follow_redirects: true
+respect_robots_txt: false
+crawl_sitemap: true
+crawl_js_routes: false
+verify_findings: true
+capture_screenshots: false
+custom_headers: {}
+custom_cookies: {}
+report_template: default
+export_formats:
+- html
+- json
+fail_on_severity: ''
+scope:
+  allowed_patterns:
+  - /**
+  denied_patterns:
+  - /logout
+  - /signout
+  allowed_domains: []
+  denied_domains: []
+  max_pages: 100
+  max_depth: 3
+  max_smart_probes: 200
+  requests_per_second: 15.0
+  burst_limit: 30
+  auth_ref: ''
+  follow_redirects: true
+  respect_robots_txt: false
+  crawl_sitemap: true
+  crawl_js_routes: true
+  enabled_scanners: []
+  disabled_scanners: []
+  custom_headers: {}
+  custom_cookies: {}

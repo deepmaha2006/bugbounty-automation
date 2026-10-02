@@ -1,0 +1,39 @@
+# HydraX — safe, intentionally-vulnerable practice targets (spec §24).
+#
+# Standing these up gives a *known* set of real vulnerabilities to validate
+# HydraX's detection accuracy against, without ever pointing a scan at a
+# system nobody explicitly authorized. See docs/SAFE_TEST_ENVIRONMENT.md for
+# how to actually scan these once they're running — it is NOT as simple as
+# adding their local URL through the webapp API (see that doc's "why not
+# just scan localhost" section: utils/ssrf_guard.py correctly refuses every
+# private/loopback address, which is exactly what these containers bind to).
+#
+# This is a SEPARATE compose file from docker-compose.yml on purpose — these
+# services are for local detection-accuracy validation only and must never
+# be part of a production deployment.
+#
+# Usage:
+#   docker compose -f docker-compose.testenv.yml up -d
+#   docker compose -f docker-compose.testenv.yml down -v   # tear down + wipe state
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  webgoat:
+    image: webgoat/webgoat:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:9090:9090"   # WebWolf, WebGoat's companion attacker-side app
+    environment:
+      WEBGOAT_HOST: "127.0.0.1"
+      WEBWOLF_HOST: "127.0.0.1"
+
+  dvwa:
+    image: vulnerables/web-dvwa:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4280:80"

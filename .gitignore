@@ -1,0 +1,99 @@
+# ── AI Tooling (never publish) ───────────────────────────────────────────────
+.claude/
+CLAUDE.md
+MEMORY.md
+memory/
+agentic-awesome-skills
+hacking-skills
+communitytools
+Claude-Code-CyberSecurity-Skill
+AGENTS.md
+
+# ── Internal dev / planning notes (not for public repo) ─────────────────────
+FRONTEND_NOTES.md
+PRODUCTION_UPGRADE_PLAN.md
+QUICK_START_UPGRADE.md
+
+# ── Stale / wrong-context artifacts ─────────────────────────────────────────
+package-lock.json
+package.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+.venv311/
+.venv-linux/
+ENV/
+
+# Node (if a JS build is ever added)
+node_modules/
+
+# Machine-local tool settings
+*.local.json
+.claude/settings.local.json
+
+# Desktop app per-user runtime data (written by the Profile page)
+config/profile.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project data (user-specific, contains secrets)
+webapp/data/
+*.db
+*.sqlite3
+
+# Reports (generated, user-specific)
+reports/*.html
+reports/*.json
+reports/*.sarif
+
+# Secrets - never commit
+.env
+.env.*
+# ...except the checked-in template itself (Phase 17, spec §26) — a bare
+# `.env.*` would otherwise silently exclude it too, same bug class as the
+# `test_*`/`*_test.py` gitignore fixes elsewhere in this history.
+!.env.example
+secrets/
+
+# Tools (large binaries, not for git)
+tools/
+
+# Logs
+*.log
+logs/
+
+# Test artifacts (root-level scratch scripts only — NOT tests/, which is the
+# real pytest suite, and NOT scripts/, which has its own committed CI
+# scripts — both must stay tracked in git for CI to run them). Scoped to
+# root-level (leading /) after the exact same class of bug as the original
+# `test_*` version of this line: an unscoped `*_test.py` silently ignored
+# the newly-added scripts/ci_db_smoke_test.py (Phase 16) at any depth.
+/test_*
+/*_test.py
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Playwright
+playwright-report/
+test-results/

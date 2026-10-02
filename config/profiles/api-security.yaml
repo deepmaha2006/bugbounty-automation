@@ -1,0 +1,69 @@
+name: api-security
+description: Focused API security testing with parameter fuzzing and authentication bypass checks
+version: '1.0'
+tags:
+- api
+- security
+- owasp-top10
+auth_ref: ''
+enabled_scanners:
+- broken_access
+- info_disclosure
+- security_misconfig
+disabled_scanners:
+- ddos_tester
+- subdomain_takeover
+max_pages: 50
+max_depth: 3
+max_smart_probes: 200
+requests_per_second: 5.0
+burst_limit: 10
+follow_redirects: true
+respect_robots_txt: false
+crawl_sitemap: false
+crawl_js_routes: true
+verify_findings: true
+capture_screenshots: false
+custom_headers:
+  Content-Type: application/json
+  Accept: application/json
+custom_cookies: {}
+report_template: default
+export_formats:
+- html
+- json
+- sarif
+fail_on_severity: High
+scope:
+  allowed_patterns:
+  - /api/*
+  - /rest/*
+  - /v1/*
+  - /v2/*
+  - /graphql
+  denied_patterns:
+  - /logout
+  - /signout
+  allowed_domains: []
+  denied_domains: []
+  max_pages: 50
+  max_depth: 3
+  max_smart_probes: 200
+  requests_per_second: 5.0
+  burst_limit: 10
+  auth_ref: ''
+  follow_redirects: true
+  respect_robots_txt: false
+  crawl_sitemap: false
+  crawl_js_routes: true
+  enabled_scanners:
+  - broken_access
+  - info_disclosure
+  - security_misconfig
+  disabled_scanners:
+  - ddos_tester
+  - subdomain_takeover
+  custom_headers:
+    Content-Type: application/json
+    Accept: application/json
+  custom_cookies: {}

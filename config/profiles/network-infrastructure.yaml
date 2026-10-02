@@ -1,0 +1,63 @@
+name: network-infrastructure
+description: Network infrastructure scanning including service discovery and misconfiguration checks
+version: '1.0'
+tags:
+- network
+- infrastructure
+- scanning
+auth_ref: ''
+enabled_scanners:
+- info_disclosure
+- security_misconfig
+- ddos_tester
+disabled_scanners:
+- xss_scanner
+- sql_injection
+- broken_access
+max_pages: 20
+max_depth: 2
+max_smart_probes: 100
+requests_per_second: 2.0
+burst_limit: 5
+follow_redirects: true
+respect_robots_txt: true
+crawl_sitemap: true
+crawl_js_routes: false
+verify_findings: true
+capture_screenshots: false
+custom_headers: {}
+custom_cookies: {}
+report_template: default
+export_formats:
+- html
+- json
+fail_on_severity: Medium
+scope:
+  allowed_patterns:
+  - /*
+  denied_patterns:
+  - /admin/*
+  - /wp-admin/*
+  - /phpmyadmin/*
+  allowed_domains: []
+  denied_domains: []
+  max_pages: 20
+  max_depth: 2
+  max_smart_probes: 100
+  requests_per_second: 2.0
+  burst_limit: 5
+  auth_ref: ''
+  follow_redirects: true
+  respect_robots_txt: true
+  crawl_sitemap: true
+  crawl_js_routes: false
+  enabled_scanners:
+  - info_disclosure
+  - security_misconfig
+  - ddos_tester
+  disabled_scanners:
+  - xss_scanner
+  - sql_injection
+  - broken_access
+  custom_headers: {}
+  custom_cookies: {}

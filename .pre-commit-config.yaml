@@ -1,0 +1,9 @@
+# HydraX pre-commit hooks (spec §21/§25: secret scanning as a pre-commit
+# hook, not just in CI). Install with:
+#   pip install pre-commit
+#   pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

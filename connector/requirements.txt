@@ -1,0 +1,6 @@
+# HydraX Company Connector agent — deliberately minimal.
+# Install on the machine that will run agent.py, independent of the main
+# platform's requirements.txt (this agent imports nothing from webapp/
+# core/scanners/utils).
+requests>=2.31.0
+cryptography>=42.0.2

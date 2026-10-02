@@ -1,0 +1,68 @@
+name: api-deep
+description: Deep API security scan with extended limits and API-focused scanners
+version: '1.0'
+tags:
+- api
+- deep
+- rest
+- graphql
+auth_ref: ''
+enabled_scanners:
+- api
+- sqli
+- bac
+- auth_session
+- business_logic
+- ssrf
+- xxe
+- ssti
+- idor
+- rate_limit
+- jwt
+- cors
+- openapi
+- graphql
+- mass_assignment
+disabled_scanners: []
+max_pages: 0
+max_depth: 0
+max_smart_probes: 0
+requests_per_second: 0.0
+burst_limit: 0
+follow_redirects: true
+respect_robots_txt: false
+crawl_sitemap: true
+crawl_js_routes: false
+verify_findings: true
+capture_screenshots: false
+custom_headers: {}
+custom_cookies: {}
+report_template: default
+export_formats:
+- html
+- json
+- sarif
+fail_on_severity: high
+scope:
+  allowed_patterns:
+  - /api/**
+  - /v*/**
+  - /graphql
+  - /graphiql
+  denied_patterns: []
+  allowed_domains: []
+  denied_domains: []
+  max_pages: 500
+  max_depth: 10
+  max_smart_probes: 1000
+  requests_per_second: 20.0
+  burst_limit: 50
+  auth_ref: ''
+  follow_redirects: true
+  respect_robots_txt: false
+  crawl_sitemap: true
+  crawl_js_routes: false
+  enabled_scanners: []
+  disabled_scanners: []
+  custom_headers: {}
+  custom_cookies: {}

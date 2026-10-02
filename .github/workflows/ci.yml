@@ -1,0 +1,116 @@
+name: CI
+
+# CVM platform spec §25 — verification + security gates on every push/PR.
+#
+# Five independent jobs:
+#   test              — real Postgres/Redis service containers (the first
+#                       place in this project's history any of this code has
+#                       run against a genuine Postgres instead of the
+#                       hermetic FakeDB test double — see
+#                       scripts/ci_db_smoke_test.py), plus the existing
+#                       syntax/import check and the full hermetic pytest
+#                       suite.
+#   sast              — bandit static analysis for Python.
+#   dependency-scan   — pip-audit against requirements.txt, fails on known
+#                       vulnerable direct dependencies.
+#   secret-scan       — gitleaks, full history + working tree.
+#   container-scan    — trivy against the built app image (Phase 17 added
+#                       the Dockerfile this needs — deferred from Phase 16
+#                       until then, see docs/ROADMAP.md).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: hydrax
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hydrax"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: hydrax
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ci-only-password
+      HYDRAX_REDIS_URL: redis://localhost:6379/0
+      HYDRAX_JWT_DEV_MODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Real-Postgres schema smoke test
+        run: python scripts/ci_db_smoke_test.py
+      - name: Syntax + import check
+        run: python run_checks.py
+      - name: Hermetic test suite
+        run: python -m pytest -q
+
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install bandit
+        run: pip install bandit
+      - name: Bandit (fail on medium+ severity, medium+ confidence)
+        run: bandit -r webapp core scanners utils config connector -ll -ii
+
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit direct + transitive dependencies
+        run: pip-audit -r requirements.txt
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  container-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t hydrax:ci .
+      - name: Trivy scan (fail on high/critical)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: hydrax:ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true

@@ -1,0 +1,129 @@
+# HydraX — full platform: PostgreSQL + Redis + the FastAPI app + Celery
+# worker/beat (spec §26).
+#
+# webapp/db.py connects exclusively via psycopg2; there is no SQLite
+# fallback, so Postgres is required before the app will start. Defaults here
+# match webapp/config.py's env var fallbacks (POSTGRES_HOST=localhost,
+# POSTGRES_PORT=5432, POSTGRES_DB=hydrax, POSTGRES_USER=postgres). Redis
+# backs the Celery job queue/scheduler (webapp/celery_app.py, Phase 5).
+#
+# postgres/redis have no `profiles:` set, so they always start regardless of
+# which profile is active — they're shared infrastructure every other
+# profile depends on. `app`/`worker`/`beat` are profile-gated:
+#
+#   dev      docker compose --profile dev up          (hot-reload app only;
+#            run scans manually, no continuous-monitoring worker/beat)
+#   staging  docker compose --profile staging up       (full stack, prod image)
+#   prod     docker compose --profile prod up -d       (full stack, detached)
+#
+# There's no `test` profile service here on purpose: the hermetic pytest
+# suite (`python -m pytest -q`) never touches a real database at all (see
+# tests/conftest.py's FakeDB), so it needs neither this compose file nor a
+# running app container — see .github/workflows/ci.yml, which spins up its
+# own disposable Postgres/Redis service containers instead for the one
+# script that *does* need a real database (scripts/ci_db_smoke_test.py).
+#
+# Usage:
+#   cp .env.example .env   # fill in real secrets — see that file
+#   docker compose --profile dev up          # hot-reload app, no worker/beat
+#   docker compose --profile prod up -d      # full stack, detached
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hydrax
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+    ports:
+      - "5432:5432"
+    volumes:
+      - hydrax-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d hydrax"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - hydrax-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    profiles: ["dev"]
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      HYDRAX_REDIS_URL: redis://redis:6379/0
+      HYDRAX_JWT_DEV_MODE: "1"
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    command: ["uvicorn", "webapp.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  app-prod:
+    profiles: ["staging", "prod"]
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      HYDRAX_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    profiles: ["staging", "prod"]
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      HYDRAX_REDIS_URL: redis://redis:6379/0
+    command: ["celery", "-A", "webapp.celery_app", "worker", "--loglevel=info"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    profiles: ["staging", "prod"]
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      HYDRAX_REDIS_URL: redis://redis:6379/0
+    command: ["celery", "-A", "webapp.celery_app", "beat", "--loglevel=info"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  hydrax-postgres-data:
+  hydrax-redis-data:

@@ -1,0 +1,7 @@
+{
+  "timeout": 10.0,
+  "delay": 0.05,
+  "threads": 8,
+  "verify_ssl": true,
+  "max_findings": 50
+}

@@ -1,0 +1,67 @@
+name: compliance
+description: Compliance scan covering OWASP Top 10 and common regulatory requirements
+version: '1.0'
+tags:
+- compliance
+- owasp
+- pci
+- hipaa
+auth_ref: ''
+enabled_scanners:
+- xss
+- sqli
+- bac
+- auth_session
+- ssrf
+- xxe
+- ssti
+- idor
+- csrf
+- file_upload
+- rce
+- security_misconfig
+- sensitive_data
+- crypto
+disabled_scanners: []
+max_pages: 0
+max_depth: 0
+max_smart_probes: 0
+requests_per_second: 0.0
+burst_limit: 0
+follow_redirects: true
+respect_robots_txt: false
+crawl_sitemap: true
+crawl_js_routes: false
+verify_findings: true
+capture_screenshots: false
+custom_headers: {}
+custom_cookies: {}
+report_template: default
+export_formats:
+- html
+- json
+- sarif
+fail_on_severity: medium
+scope:
+  allowed_patterns:
+  - /**
+  denied_patterns:
+  - /logout
+  - /signout
+  - /delete*
+  allowed_domains: []
+  denied_domains: []
+  max_pages: 300
+  max_depth: 5
+  max_smart_probes: 500
+  requests_per_second: 10.0
+  burst_limit: 20
+  auth_ref: ''
+  follow_redirects: true
+  respect_robots_txt: false
+  crawl_sitemap: true
+  crawl_js_routes: true
+  enabled_scanners: []
+  disabled_scanners: []
+  custom_headers: {}
+  custom_cookies: {}

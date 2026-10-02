@@ -1,0 +1,65 @@
+name: cms
+description: Content Management System security scan
+version: '1.0'
+tags:
+- cms
+- wordpress
+- drupal
+- joomla
+auth_ref: ''
+enabled_scanners:
+- xss
+- sqli
+- bac
+- file_upload
+- rce
+- xxe
+- security_misconfig
+- sensitive_data
+- outdated_components
+- wp_users
+- wp_plugins
+- wp_config
+- drupal_modules
+disabled_scanners: []
+max_pages: 0
+max_depth: 0
+max_smart_probes: 0
+requests_per_second: 0.0
+burst_limit: 0
+follow_redirects: true
+respect_robots_txt: false
+crawl_sitemap: true
+crawl_js_routes: false
+verify_findings: true
+capture_screenshots: false
+custom_headers: {}
+custom_cookies: {}
+report_template: default
+export_formats:
+- html
+- json
+fail_on_severity: ''
+scope:
+  allowed_patterns:
+  - /**
+  denied_patterns:
+  - /logout
+  - /signout
+  - /wp-login.php?action=logout
+  allowed_domains: []
+  denied_domains: []
+  max_pages: 150
+  max_depth: 4
+  max_smart_probes: 300
+  requests_per_second: 8.0
+  burst_limit: 15
+  auth_ref: ''
+  follow_redirects: true
+  respect_robots_txt: false
+  crawl_sitemap: true
+  crawl_js_routes: true
+  enabled_scanners: []
+  disabled_scanners: []
+  custom_headers: {}
+  custom_cookies: {}
