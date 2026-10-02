@@ -338,7 +338,8 @@ YAML presets in config/profiles/:
 | **JSON** | API integrations, custom pipelines |
 | **SARIF** | GitHub Code Scanning, CI/CD integration |
 
-Reports saved to eports/.
+Reports saved to 
+eports/.
 
 ---
 
@@ -421,7 +422,7 @@ Unauthorized use, reproduction, or distribution constitutes infringement and mis
 
 ## 📁 Project Structure
 
-`
+```text
 bugbounty-automation/
 ├── main.py                    # Desktop app entry point
 ├── run_checks.py              # Syntax/import verification
@@ -446,8 +447,7 @@ bugbounty-automation/
 ├── deploy/                    # Nginx config, deployment scripts
 ├── docs/                      # Architecture, security, threat model, roadmap
 └── tests/                     # Hermetic test suite
-`
-
+```
 ---
 
 <div align="center">
