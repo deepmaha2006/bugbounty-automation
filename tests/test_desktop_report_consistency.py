@@ -84,8 +84,8 @@ def test_reporter_counts_match_ui_for_nested_report():
 def test_html_report_shows_same_totals_findings_and_real_version():
     report = _engine_report_dict()
     html = ReportGenerator().generate_html_report(report)
-    assert "identified 13 security vulnerabilities" in html
-    assert "<strong>Findings Count:</strong> 13" in html
+    assert "identified 13 confirmed security vulnerabilities" in html
+    assert "<strong>Findings Count:</strong> 13 confirmed" in html
     for f in _ui_findings(report):
         assert f["type"] in html
     assert f"HydraX {VERSION}" in html and "HydraX Unknown" not in html
@@ -106,7 +106,7 @@ def test_saved_json_and_html_match_ui(tmp_path):
     assert saved["scanner_version"] == VERSION and saved["results"] == report["results"]
 
     html = store.save(report, fmt="html").read_text(encoding="utf-8")
-    assert "identified 13 security vulnerabilities" in html
+    assert "identified 13 confirmed security vulnerabilities" in html
     assert "report_data" not in report and "findings" not in report   # caller's dict untouched
 
 

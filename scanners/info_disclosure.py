@@ -69,7 +69,10 @@ class InfoDisclosureScanner:
     }
 
     EXPOSED_PATHS = [
-        '/robots.txt', '/sitemap.xml', '/crossdomain.xml', '/.htaccess',
+        # robots.txt and sitemap.xml intentionally omitted: they are public by design.
+        # Their presence is not a vulnerability; their content may warrant review but
+        # is not a finding HydraX should report.
+        '/crossdomain.xml', '/.htaccess',
         '/.git/config', '/.git/HEAD', '/.svn/entries', '/.DS_Store',
         '/phpinfo.php', '/info.php', '/test.php', '/.env', '/.env.example',
         '/config.php.bak', '/config.bak', '/config.old', '/dump.sql',
@@ -331,7 +334,19 @@ class InfoDisclosureScanner:
                     if not re.search(r'function|=>|const\s|let\s|var\s|document\.|window\.|\{', text):
                         continue
 
+                    # Detect minified JS — `:!0` boolean idioms and very long
+                    # single lines are produced by bundlers, not developers.
+                    # "Passwords in Comments" patterns match minifier artefacts
+                    # (e.g. `enabled:!0`) that are not credential literals.
+                    lines = text.splitlines()
+                    is_minified = bool(
+                        lines
+                        and max(len(l) for l in lines) > 500
+                    ) or bool(re.search(r'[;,]\s*[a-z]\s*:\s*!0\b', text))
+
                     for data_type, pattern in self.SENSITIVE_PATTERNS.items():
+                        if data_type == 'Passwords in Comments' and is_minified:
+                            continue
                         matches = re.findall(pattern, text)
                         if not matches:
                             continue

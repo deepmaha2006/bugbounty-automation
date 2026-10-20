@@ -99,6 +99,7 @@ from scanners.core import (           # noqa: E402
     CacheScanner, RequestSmuggler, OpenRedirectScanner,
     ClickjackTester, PrototypePollutionScanner, XMLScanner,
     WebSocketScanner, LLMScanner,
+    NucleiScanner, NmapScanner, SqlmapScanner,
 )
 
 SCANNER_CATEGORIES = [
@@ -158,6 +159,18 @@ SCANNER_CATEGORIES = [
              "desc": "Rate limiting, concurrency and payload limits", "cls": DDoSTester, "default": False},
             {"key": "recon", "name": "Passive Reconnaissance",
              "desc": "DNS, WHOIS, SSL and technology fingerprinting", "cls": PassiveRecon, "default": True},
+        ],
+    },
+    {
+        "name": "Kali Power Tools",
+        "icon": "⚡",
+        "scanners": [
+            {"key": "nuclei", "name": "Nuclei",
+             "desc": "Template-based CVE and misconfiguration scanner (requires nuclei)", "cls": NucleiScanner, "default": False},
+            {"key": "nmap", "name": "Nmap Port Scan",
+             "desc": "Port and service discovery with version detection (requires nmap)", "cls": NmapScanner, "default": False},
+            {"key": "sqlmap", "name": "sqlmap",
+             "desc": "Advanced SQL injection detection and exploitation (requires sqlmap)", "cls": SqlmapScanner, "default": False},
         ],
     },
     {

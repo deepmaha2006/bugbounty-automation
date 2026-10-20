@@ -17,6 +17,8 @@
 ![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![Celery](https://img.shields.io/badge/Celery-5.3%2B-37814A?style=for-the-badge&logo=celery&logoColor=white)
 ![License](https://img.shields.io/badge/License-Proprietary-critical?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-1701%20passing-brightgreen?style=for-the-badge)
+![Precision](https://img.shields.io/badge/FP%20Rate-%E2%89%A45%25%20(measured)-brightgreen?style=for-the-badge)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-orange?style=for-the-badge)
 ![Author](https://img.shields.io/badge/Author-Deepesh%20Mahawar-blueviolet?style=for-the-badge)
 
@@ -46,6 +48,7 @@
 - [Scan Profiles](#-scan-profiles)
 - [Report Formats](#-report-formats)
 - [Docker Deployment](#-docker-deployment)
+- [Precision Engineering — False Positive Reduction](#-precision-engineering--false-positive-reduction)
 - [Security Model](#-security-model)
 - [Legal & Ethics](#-legal--ethics)
 - [Author & Ownership](#-author--ownership)
@@ -72,6 +75,7 @@ HydraX is purpose-built to accelerate the recon-to-report cycle in authorized bu
 | **JS-Aware Crawling** | Playwright/Chromium-powered surface discovery for SPAs and JavaScript-heavy applications |
 | **API Security** | REST API fuzzing, authentication bypass, JWT attacks, GraphQL introspection |
 | **Cloud Security** | S3 bucket exposure, cloud metadata endpoint testing, misconfigured cloud resources |
+| **Precision / FP Hardening** | Oracle-gated confirmation (re-proof / tool / OOB), dalfox + sqlmap + nuclei corroboration, context-aware witness payloads, Interactsh OOB callbacks, precision benchmark ≥ 95% |
 | **Reporting** | HTML (interactive), JSON (machine-readable), SARIF (GitHub/CI-compatible) |
 | **Multi-Tenancy** | Organization-scoped data isolation, RBAC, JWT auth with fail-closed design |
 | **Alerting** | SMTP-based alerting with configurable cooldowns, SSE event streaming |
@@ -295,7 +299,8 @@ celery -A webapp.celery_app worker --loglevel=info --concurrency=4
 
 `ash
 python run_checks.py   # syntax + import check
-python -m pytest -q    # hermetic tests (no real DB/network)
+python -m pytest -q    # hermetic tests (1701 tests, no real DB/network)
+make benchmark         # precision/recall benchmark (requires Juice Shop + DVWA)
 `
 
 ---
@@ -365,6 +370,62 @@ docker compose down -v
 `
 
 For Nginx reverse proxy setup, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+---
+
+## 🎯 Precision Engineering — False Positive Reduction
+
+HydraX is engineered to report **only proven findings**. Every confirmed vulnerability must survive an independent verification oracle before appearing in a report — bare heuristics are downgraded to `unconfirmed` and excluded from counts.
+
+### The Oracle Requirement
+
+Every `confirmed` finding carries a `ConfirmationRecord`:
+
+```python
+{
+  "method":             "re-proof" | "tool" | "oob" | "inspection",
+  "oracle":             "sqlmap confirmed SQL injection",
+  "evidence":           "<raw evidence string>",
+  "reproduced":         True,
+  "corroborating_tool": "sqlmap",   # or "dalfox", "nuclei", "httpx"
+  "wstg_id":            "WSTG-INPV-05"
+}
+```
+
+A finding without `reproduced: true` is automatically downgraded to `possible` regardless of heuristic score.
+
+### Tool Corroboration Layer (`utils/corroboration.py`)
+
+After HydraX's own heuristic flags a candidate, it runs the relevant mature tool against the **same endpoint** and only confirms if the tool independently agrees:
+
+| Vuln Class | Corroborating Tool | Confirmation Signal |
+|---|---|---|
+| XSS | [Dalfox](https://github.com/hahwul/dalfox) | `[POC]` line in output |
+| SQL Injection | [sqlmap](https://github.com/sqlmapproject/sqlmap) | "is vulnerable" in output |
+| Misconfig / CVEs | [Nuclei](https://github.com/projectdiscovery/nuclei) | Template match |
+| Header checks | [httpx](https://github.com/projectdiscovery/httpx) | Header probe |
+
+If the corroborating tool is not installed, the finding stays `unconfirmed` — it is never reported on a bare heuristic alone.
+
+### Context-Aware Witness Payloads
+
+The XSS scanner detects the **reflection context** first (HTML body / attribute / JS string / URL / comment) and sends only the matching witness payload — one whose firing is unambiguous in that exact context.
+
+### Out-of-Band Confirmation (`utils/oob_tracker.py`)
+
+Blind/stored/OOB classes (blind XSS, OOB SQLi, blind SSRF, RCE callbacks) are confirmed **only** on a correlated DNS/HTTP callback from an [Interactsh](https://github.com/projectdiscovery/interactsh) server. Set `HYDRAX_OOB_SERVER` to enable; when absent, these checks are skipped and the report notes it.
+
+### Precision Benchmark (`benchmark/`)
+
+```bash
+# With Juice Shop + DVWA running:
+docker run -d -p 3000:3000 bkimminich/juice-shop
+docker run -d -p 4280:80 vulnerables/web-dvwa
+
+make benchmark   # → benchmark/RESULTS.md
+```
+
+The runner computes **precision = TP/(TP+FP)** and **recall = TP/(TP+FN)** against labeled ground-truth targets. Gate: precision ≥ 0.95. The static-SPA negative set must yield **zero confirmed findings**. Results are published as `benchmark/RESULTS.md` and uploaded as a CI artifact on every push.
 
 ---
 

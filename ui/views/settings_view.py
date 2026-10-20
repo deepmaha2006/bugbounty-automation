@@ -36,6 +36,7 @@ from ui.theme import (
     BORDER_WIDTH_HAIRLINE, BORDER_WIDTH_ACCENT,
 )
 from ui.widgets import (SectionHeader, PrimaryButton, GhostButton, make_card)
+from ui.tool_readiness_panel import ToolReadinessPanel
 
 
 SETTINGS_FILE = PROJECT_ROOT / "config" / "settings.json"
@@ -175,6 +176,33 @@ class SettingsView(ctk.CTkFrame):
             fg_color=SURFACE_STRONG
         ).grid(row=len(fields) + 1, column=1, sticky="w", padx=(0, CARD_PADDING), pady=SPACE_3)
 
+        # Reduce Motion toggle
+        ctk.CTkLabel(
+            engine,
+            text="Reduce motion (accessibility)",
+            font=ctk.CTkFont(*FONTS["body"]),
+            text_color=TEXT_PRIMARY,
+            anchor="w"
+        ).grid(row=len(fields) + 2, column=0, sticky="w", padx=CARD_PADDING, pady=SPACE_3)
+
+        import ui.motion as _motion
+        self._reduce_motion_var = ctk.BooleanVar(value=_motion.REDUCE_MOTION)
+
+        def _on_reduce_motion_toggle():
+            import ui.motion as m
+            m.REDUCE_MOTION = bool(self._reduce_motion_var.get())
+
+        ctk.CTkSwitch(
+            engine,
+            text="",
+            variable=self._reduce_motion_var,
+            command=_on_reduce_motion_toggle,
+            button_color=SURFACE_RAISED,
+            button_hover_color=SURFACE_STRONG,
+            progress_color=SURFACE_RAISED,
+            fg_color=SURFACE_STRONG
+        ).grid(row=len(fields) + 2, column=1, sticky="w", padx=(0, CARD_PADDING), pady=SPACE_3)
+
         save_btn = PrimaryButton(
             engine,
             "SAVE SETTINGS",
@@ -182,12 +210,16 @@ class SettingsView(ctk.CTkFrame):
             height=BTN_HEIGHT_MD,
             width=BTN_WIDTH_MD
         )
-        save_btn.grid(row=len(fields) + 2, column=0, columnspan=2, sticky="w",
+        save_btn.grid(row=len(fields) + 3, column=0, columnspan=2, sticky="w",
                       padx=CARD_PADDING, pady=(SPACE_3, CARD_PADDING))
+
+        # Tool Readiness card
+        self._tool_panel = ToolReadinessPanel(body)
+        self._tool_panel.grid(row=1, column=0, sticky="ew", padx=0, pady=(SPACE_4, 0))
 
         # About card
         info = make_card(body)
-        info.grid(row=1, column=0, sticky="ew", padx=0, pady=0)
+        info.grid(row=2, column=0, sticky="ew", padx=0, pady=(SPACE_4, 0))
         info.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
@@ -240,4 +272,5 @@ class SettingsView(ctk.CTkFrame):
                               "Scan engine settings updated successfully.")
 
     def refresh(self):
-        pass
+        # Kick off tool-readiness preflight whenever the Settings page is opened.
+        self._tool_panel.run_preflight()

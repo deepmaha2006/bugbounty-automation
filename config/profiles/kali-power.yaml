@@ -1,0 +1,59 @@
+name: kali-power
+description: >
+  Kali power-tool preset for engagements where nuclei, nmap, and sqlmap are
+  installed. All three are opt-in (default=False) and are NOT included in
+  web-full — this profile is the only way to select them as a group.
+  Requires the Kali tools to be installed; the preflight gate will skip any
+  tool that is absent.
+version: '1.0'
+tags:
+  - kali
+  - power
+  - advanced
+  - requires-tools
+auth_ref: ''
+enabled_scanners:
+  - nuclei
+  - nmap
+  - sqlmap
+disabled_scanners: []
+max_pages: 0
+max_depth: 0
+max_smart_probes: 0
+requests_per_second: 0.0
+burst_limit: 0
+follow_redirects: true
+respect_robots_txt: false
+crawl_sitemap: false
+crawl_js_routes: false
+verify_findings: true
+capture_screenshots: false
+custom_headers: {}
+custom_cookies: {}
+report_template: default
+export_formats:
+  - html
+  - json
+fail_on_severity: ''
+scope:
+  allowed_patterns:
+    - /**
+  denied_patterns:
+    - /logout
+    - /signout
+  allowed_domains: []
+  denied_domains: []
+  max_pages: 500
+  max_depth: 10
+  max_smart_probes: 1000
+  requests_per_second: 5.0
+  burst_limit: 10
+  auth_ref: ''
+  follow_redirects: true
+  respect_robots_txt: false
+  crawl_sitemap: false
+  crawl_js_routes: false
+  enabled_scanners: []
+  disabled_scanners: []
+  custom_headers: {}
+  custom_cookies: {}

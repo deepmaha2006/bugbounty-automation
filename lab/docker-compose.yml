@@ -1,0 +1,145 @@
+version: "3.9"
+
+# HydraX Live Lab — fully isolated Docker topology.
+# All services share the `hydraxlab` bridge network; nothing is reachable
+# from the public internet.  The only host-mapped port is hydrax-api:8000
+# (for the test suite running on the host) and postgres:5433 (for direct
+# DB verification in tests_live/).
+#
+# Start:  make lab-up
+# Stop:   make lab-down
+# Seed:   make seed     (after lab-up)
+# Test:   make lab-test (after seed)
+
+networks:
+  hydraxlab:
+    driver: bridge
+
+volumes:
+  pg_data:
+  victim_logs:     # nginx access logs shared between waf-proxy and connector
+  waf_rules:       # HydraX WAF snippet directory (HYDRAX_WAF_DIR)
+  connector_home:  # connector identity file persisted across restarts
+
+services:
+
+  # ------------------------------------------------------------------ #
+  # PostgreSQL — real schema, real transactions, real org-scoping.      #
+  # ------------------------------------------------------------------ #
+  postgres:
+    image: postgres:15-alpine
+    container_name: lab-postgres
+    environment:
+      POSTGRES_DB: hydrax
+      POSTGRES_USER: hydrax
+      POSTGRES_PASSWORD: hydraxlab
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - hydraxlab
+    ports:
+      - "5433:5432"   # host:5433 → container:5432 (avoids colliding with a local PG)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hydrax -d hydrax"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ------------------------------------------------------------------ #
+  # HydraX API — FastAPI + brain routers talking to real Postgres.     #
+  # ------------------------------------------------------------------ #
+  hydrax-api:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile.api
+    container_name: lab-hydrax-api
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: hydrax
+      POSTGRES_USER: hydrax
+      POSTGRES_PASSWORD: hydraxlab
+      HYDRAX_JWT_SECRET: "lab-jwt-secret-not-for-production"
+      HYDRAX_ADMIN_USERNAME: admin
+      HYDRAX_ADMIN_PASSWORD: adminpassword
+      # Platform signing key used to sign connector jobs.
+      # In production this is a secret; for the lab we derive one on startup.
+      HYDRAX_CONNECTOR_SIGNING_KEY_PATH: /app/lab/signing_key.pem
+    volumes:
+      - ..:/app
+      - waf_rules:/hydrax-waf-rules
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - hydraxlab
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    command: >
+      sh -c "
+        python -c 'from webapp.db import init_db; init_db()' &&
+        uvicorn webapp.main:app --host 0.0.0.0 --port 8000
+      "
+
+  # ------------------------------------------------------------------ #
+  # Connector — enrolls on first start, polls hydrax-api for jobs.     #
+  # Runs nginx as a transparent proxy to victim so all attacker traffic  #
+  # flows through this container's network namespace.                   #
+  # iptables on THIS container is what block_source actually modifies.  #
+  # ------------------------------------------------------------------ #
+  connector:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile.connector
+    container_name: lab-connector
+    environment:
+      HYDRAX_API: http://hydrax-api:8000
+      HYDRAX_CONNECTOR_HOME: /connector-home
+      HYDRAX_WAF_DIR: /hydrax-waf-rules
+    volumes:
+      - ..:/app
+      - connector_home:/connector-home
+      - victim_logs:/var/log/nginx
+      - waf_rules:/hydrax-waf-rules
+    depends_on:
+      hydrax-api:
+        condition: service_healthy
+    networks:
+      - hydraxlab
+    cap_add:
+      - NET_ADMIN    # iptables for block_source
+    ports:
+      - "8080:80"    # host:8080 → connector's nginx proxy (for manual testing)
+    entrypoint: ["/app/lab/connector-entrypoint.sh"]
+
+  # ------------------------------------------------------------------ #
+  # Victim — OWASP Juice Shop, internal only (not host-exposed).       #
+  # Connector proxies ALL traffic to victim:3000.                       #
+  # ------------------------------------------------------------------ #
+  victim:
+    image: bkimminich/juice-shop:latest
+    container_name: lab-victim
+    networks:
+      - hydraxlab
+    # Not host-exposed: all traffic goes through connector's nginx proxy.
+
+  # ------------------------------------------------------------------ #
+  # Attacker — sends benign scripted "attack" requests to connector.   #
+  # ------------------------------------------------------------------ #
+  attacker:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile.attacker
+    container_name: lab-attacker
+    environment:
+      TARGET_URL: http://connector    # hits connector's nginx proxy
+    networks:
+      - hydraxlab
+    # Does NOT start automatically; the test suite or seed.py drives it.
+    profiles: ["attack"]
+    entrypoint: ["python", "/app/lab/attack_sim.py", "--once"]

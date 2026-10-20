@@ -111,6 +111,12 @@ class FakeDB:
         self.sql_log = []
         self._settings = {}
         self._profiles = {}
+        # HydraBrain tables (Phase 12)
+        self.brain_events: list = []
+        self.brain_incidents: list = []
+        self.brain_actions: list = []
+        self.brain_knowledge: list = []
+        self._brain_seq = {"event": 0, "incident": 0, "action": 0, "knowledge": 0}
         # Every fixture-driven test starts with the same Default Organization
         # a fresh real DB would have after init_db()'s migration.
         self._seq["org"] += 1
@@ -355,12 +361,29 @@ class FakeDB:
         return tid
 
     def record_asset_authorization(self, organization_id, asset_id, authorized_by_user_id,
-                                   method, status, evidence=None):
+                                   method, status, evidence=None,
+                                   scope_hosts=None, scope_paths=None,
+                                   max_req_per_sec=None, expires_at=None):
         self.asset_authorizations.append({
             "organization_id": organization_id, "asset_id": asset_id,
             "authorized_by_user_id": authorized_by_user_id, "method": method,
-            "status": status, "evidence": evidence, "created_at": self._now(),
+            "status": status, "evidence": evidence,
+            "scope_hosts": scope_hosts, "scope_paths": scope_paths,
+            "max_req_per_sec": max_req_per_sec,
+            "expires_at": expires_at, "created_at": self._now(),
         })
+
+    def get_active_authorization(self, asset_id, organization_id):
+        from datetime import datetime, timezone
+        now_str = datetime.now(timezone.utc).isoformat()
+        rows = [
+            r for r in self.asset_authorizations
+            if r["asset_id"] == asset_id
+            and r["organization_id"] == organization_id
+            and r["status"] == "authorized"
+            and (r.get("expires_at") is None or r.get("expires_at", "") > now_str)
+        ]
+        return dict(rows[-1]) if rows else None
 
     def get_or_create_target(self, url, organization_id=1, verification_method="dns_txt",
                              added_by_user_id=None):
@@ -993,6 +1016,144 @@ class FakeDB:
         j["rejection_reason"] = reason
         if self.connectors.get(connector_id, {}).get("current_job_id") == job_id:
             self.connectors[connector_id]["current_job_id"] = None
+
+    # --- HydraBrain (Phase 12) -----------------------------------------------
+    def brain_insert_event(self, asset_id, org_id, src_ip, method, path, status, signals):
+        self._brain_seq["event"] += 1
+        eid = self._brain_seq["event"]
+        self.brain_events.append({
+            "id": eid, "asset_id": asset_id, "org_id": org_id, "ts": self._now(),
+            "src_ip": src_ip, "method": method, "path": path,
+            "status": status, "signals": dict(signals or {}),
+        })
+        return eid
+
+    def brain_upsert_incident(self, asset_id, org_id, fingerprint, severity,
+                              summary="", finding_id=None):
+        for inc in self.brain_incidents:
+            if (inc["asset_id"] == asset_id and inc["org_id"] == org_id
+                    and inc["fingerprint"] == fingerprint):
+                inc["last_seen"] = self._now()
+                return inc["id"]
+        self._brain_seq["incident"] += 1
+        iid = self._brain_seq["incident"]
+        self.brain_incidents.append({
+            "id": iid, "asset_id": asset_id, "org_id": org_id,
+            "fingerprint": fingerprint, "severity": severity,
+            "first_seen": self._now(), "last_seen": self._now(),
+            "state": "open", "finding_id": finding_id, "summary": summary,
+        })
+        return iid
+
+    def brain_get_incident(self, incident_id, org_id):
+        for inc in self.brain_incidents:
+            if inc["id"] == incident_id and inc["org_id"] == org_id:
+                return dict(inc)
+        return None
+
+    def brain_list_incidents(self, asset_id, org_id, state=None, limit=100):
+        rows = [i for i in self.brain_incidents
+                if i["asset_id"] == asset_id and i["org_id"] == org_id]
+        if state:
+            rows = [r for r in rows if r["state"] == state]
+        return [dict(r) for r in rows[-limit:]]
+
+    def brain_insert_action(self, asset_id, org_id, incident_id, action_type,
+                            params, tier_at_time, status="proposed",
+                            rollback_token=None):
+        self._brain_seq["action"] += 1
+        aid = self._brain_seq["action"]
+        self.brain_actions.append({
+            "id": aid, "asset_id": asset_id, "org_id": org_id,
+            "incident_id": incident_id, "type": action_type,
+            "params": dict(params or {}), "tier_at_time": tier_at_time,
+            "status": status, "approver": None, "rollback_token": rollback_token,
+            "ts": self._now(),
+        })
+        return aid
+
+    def brain_update_action_status(self, action_id, org_id, status, approver=None):
+        for a in self.brain_actions:
+            if a["id"] == action_id and a["org_id"] == org_id:
+                a["status"] = status
+                a["approver"] = approver
+                return True
+        return False
+
+    def brain_get_action(self, action_id, org_id):
+        for a in self.brain_actions:
+            if a["id"] == action_id and a["org_id"] == org_id:
+                return dict(a)
+        return None
+
+    def brain_list_actions(self, asset_id, org_id, status_filter=None, limit=200):
+        rows = [a for a in self.brain_actions
+                if a["asset_id"] == asset_id and a["org_id"] == org_id]
+        if status_filter:
+            rows = [r for r in rows if r["status"] in status_filter]
+        return [dict(r) for r in rows[-limit:]]
+
+    def brain_upsert_knowledge(self, asset_id, org_id, signature_fingerprint,
+                               attack_class, recommended_action, remediation,
+                               confidence=0.5):
+        for k in self.brain_knowledge:
+            if (k["asset_id"] == asset_id and k["org_id"] == org_id
+                    and k["signature_fingerprint"] == signature_fingerprint):
+                k.update({
+                    "attack_class": attack_class,
+                    "recommended_action": dict(recommended_action or {}),
+                    "remediation": dict(remediation or {}),
+                    "confidence": confidence,
+                    "times_seen": k["times_seen"] + 1,
+                })
+                return k["id"]
+        self._brain_seq["knowledge"] += 1
+        kid = self._brain_seq["knowledge"]
+        self.brain_knowledge.append({
+            "id": kid, "asset_id": asset_id, "org_id": org_id,
+            "signature_fingerprint": signature_fingerprint,
+            "attack_class": attack_class,
+            "recommended_action": dict(recommended_action or {}),
+            "remediation": dict(remediation or {}),
+            "confidence": confidence, "times_seen": 1, "success_rate": 0.0,
+        })
+        return kid
+
+    def brain_get_knowledge(self, asset_id, org_id, signature_fingerprint):
+        for k in self.brain_knowledge:
+            if (k["asset_id"] == asset_id and k["org_id"] == org_id
+                    and k["signature_fingerprint"] == signature_fingerprint):
+                return dict(k)
+        return None
+
+    def brain_list_events(self, asset_id, org_id, limit=200):
+        rows = [e for e in self.brain_events
+                if e["asset_id"] == asset_id and e["org_id"] == org_id]
+        return [dict(r) for r in rows[-limit:]]
+
+    def brain_list_knowledge(self, asset_id, org_id, limit=100):
+        rows = [k for k in self.brain_knowledge
+                if k["asset_id"] == asset_id and k["org_id"] == org_id]
+        rows = sorted(rows, key=lambda k: k["confidence"], reverse=True)
+        return [dict(k) for k in rows[:limit]]
+
+    def brain_list_authorized_assets(self):
+        from datetime import datetime, timezone
+        now_str = datetime.now(timezone.utc).isoformat()
+        seen = set()
+        result = []
+        for row in self.asset_authorizations:
+            if (row["status"] == "authorized"
+                    and (row.get("expires_at") is None
+                         or row.get("expires_at", "") > now_str)):
+                key = (row["asset_id"], row["organization_id"])
+                if key not in seen:
+                    seen.add(key)
+                    result.append({
+                        "asset_id": row["asset_id"],
+                        "organization_id": row["organization_id"],
+                    })
+        return result
 
     # --- reports --------------------------------------------------------------
     def add_report(self, scan_id, target_id, scan_type, fmt, path):

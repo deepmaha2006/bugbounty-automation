@@ -172,6 +172,14 @@ def _run(scan_id, user_id, target, target_id, keys) -> None:
                 alert_engine.maybe_alert(result["finding_id"])
             events.emit(scan_id, {"type": "finding", **f})
 
+        # Feed brain pipeline — silently skipped if no active authorization
+        try:
+            from brain.telemetry import ingest_scan_findings
+            from brain.sensors import AuthorizationError as _BrainAuthErr
+            ingest_scan_findings(target_id, organization_id, all_findings)
+        except Exception:
+            pass
+
         stats = _build_stats(all_findings)
         db.update_scan(scan_id, status="completed", progress=1.0, phase="Complete",
                        message=f"Found {len(all_findings)} vulnerabilities",

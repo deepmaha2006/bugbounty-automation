@@ -39,6 +39,35 @@ def _is_internal_host(host: str) -> bool:
         return host.endswith((".local", ".internal", ".lan", ".corp"))
 
 
+_CDN_KEYWORDS = frozenset({
+    'cloudflare', 'fastly', 'akamai', 'cloudfront', 'github.com',
+    'cdn77', 'stackpath', 'sucuri', 'imperva', 'edgecast', 'varnish',
+    'nginx/cloudflare',
+})
+
+
+def _is_cdn_fronted(client: 'HTTPClient', url: str) -> bool:
+    """True when the target sits behind a CDN/edge node.
+
+    CDN edge nodes absorb traffic before it reaches origin, so rate-limit and
+    connection-limit probes measure the CDN's own thresholds, not the app's.
+    Reporting Missing Rate Limiting against a Cloudflare/Fastly-fronted target
+    creates a near-certain false positive class.
+    """
+    try:
+        resp = client.get(url)
+        server = (resp.headers.get('server') or '').lower()
+        via = (resp.headers.get('via') or '').lower()
+        x_cache = (resp.headers.get('x-cache') or '').lower()
+        combined = f"{server} {via} {x_cache}"
+        # cf-ray is Cloudflare-specific; its presence alone is definitive.
+        if resp.headers.get('cf-ray') or resp.headers.get('cf-cache-status'):
+            return True
+        return any(kw in combined for kw in _CDN_KEYWORDS)
+    except Exception:
+        return False
+
+
 class DDoSTester:
     """DDoS Resilience testing (bounded, authorized-internal targets only)"""
 
@@ -46,9 +75,12 @@ class DDoSTester:
         self.client = HTTPClient(timeout=10, delay=0)
         self.name = "DDoS Resilience Tester"
         self.findings = []
+        self._cdn_fronted = False
 
     def scan(self, target_url: str) -> Dict[str, Any]:
         self.findings = []
+
+        self._cdn_fronted = _is_cdn_fronted(self.client, target_url)
 
         # Test 1: Rate limiting (rapid requests)
         self._test_rate_limiting(target_url)
@@ -87,17 +119,22 @@ class DDoSTester:
         # Check if all requests went through without rate limiting
         success_count = sum(1 for r in responses if r == 200)
         if success_count == 20:
+            # CDN edge nodes handle rate limiting on behalf of origin — a passing
+            # result proves only that the CDN allows it, not the app.
+            severity = 'Info' if self._cdn_fronted else 'Medium'
+            desc_suffix = ' (CDN-fronted — origin rate limit not tested)' if self._cdn_fronted else ''
             self.findings.append({
                 'type': 'Missing Rate Limiting',
-                'description': f'No rate limiting detected — {success_count}/20 requests succeeded at {rate:.1f} req/s',
-                'severity': 'Medium',
+                'description': f'No rate limiting detected — {success_count}/20 requests succeeded at {rate:.1f} req/s{desc_suffix}',
+                'severity': severity,
                 'evidence': f'Rate: {rate:.1f} requests/second. All requests returned HTTP 200'
             })
         elif success_count > 15:
+            severity = 'Info' if self._cdn_fronted else 'Low'
             self.findings.append({
                 'type': 'Weak Rate Limiting',
                 'description': f'Rate limiting appears weak — {success_count}/20 rapid requests succeeded',
-                'severity': 'Low',
+                'severity': severity,
                 'evidence': f'Rate: {rate:.1f} req/s. {20-success_count} requests were blocked'
             })
         else:
@@ -123,10 +160,12 @@ class DDoSTester:
 
         success = sum(1 for r in results if r == 200)
         if success == 30:
+            severity = 'Info' if self._cdn_fronted else 'Low'
+            desc_suffix = ' (CDN-fronted — connection limit not tested at origin)' if self._cdn_fronted else ''
             self.findings.append({
                 'type': 'No Connection Limiting',
-                'description': 'No concurrent connection limiting detected — 30 parallel requests all succeeded',
-                'severity': 'Low',
+                'description': f'No concurrent connection limiting detected — 30 parallel requests all succeeded{desc_suffix}',
+                'severity': severity,
                 'evidence': 'All concurrent requests returned HTTP 200'
             })
 

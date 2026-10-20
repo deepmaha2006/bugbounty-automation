@@ -29,6 +29,7 @@ from .advanced_scanners import (
     WebSocketScanner,
     LLMScanner,
 )
+from .kali_scanners import NucleiScanner, NmapScanner, SqlmapScanner
 
 __all__ = [
     'XSSScanner', 'SQLInjectionScanner', 'BrokenAccessScanner',
@@ -40,4 +41,5 @@ __all__ = [
     'CacheScanner', 'RequestSmuggler', 'OpenRedirectScanner',
     'ClickjackTester', 'PrototypePollutionScanner', 'XMLScanner',
     'WebSocketScanner', 'LLMScanner',
+    'NucleiScanner', 'NmapScanner', 'SqlmapScanner',
 ]

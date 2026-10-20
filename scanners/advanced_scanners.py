@@ -1697,8 +1697,13 @@ class CacheScanner:
                 if (value in resp.text.lower() or value in resp.headers.get('Location', '')) and not is_generic_error:
                     self.findings.append({
                         'type': 'Web Cache Poisoning',
-                        'description': f'Header {header} influences response — potential cache poisoning',
-                        'severity': 'High',
+                        'description': (
+                            f'Header {header} influences response — possible cache poisoning. '
+                            'Single-request reflection detected; end-to-end cache poisoning '
+                            'confirmation requires a second cache-hit request.'
+                        ),
+                        'severity': 'Medium',
+                        'confidence': 'possible',
                         'url': url,
                         'evidence': f'Header {header}: {value} reflected in response with cache headers present'
                     })
@@ -1747,15 +1752,19 @@ class RequestSmuggler:
                 'Transfer-Encoding': 'chunked',
             })
             resp = conn.getresponse()
-            if resp.status:
+            # 404/405 mean the endpoint doesn't exist or the method is not allowed
+            # — they are rejections, not smuggling signals. Only a 400 (malformed
+            # request processing ambiguity) is behavioral evidence worth noting.
+            if resp.status == 400:
                 self.findings.append({
                     'type': 'Potential CL.TE Smuggling',
-                    'description': f'Server may be vulnerable to CL.TE request smuggling',
-                    'severity': 'Critical',
-                    'evidence': f'Response: HTTP {resp.status} — manual verification required'
+                    'description': 'Server returned HTTP 400 on a CL.TE ambiguous request — manual verification required',
+                    'severity': 'Medium',
+                    'confidence': 'possible',
+                    'evidence': f'Response: HTTP {resp.status} — not confirmed without a second-request timing probe'
                 })
             conn.close()
-        except:
+        except Exception:
             pass
 
     def _test_te_cl(self, host: str, scheme: str):
@@ -1769,15 +1778,16 @@ class RequestSmuggler:
                 'Transfer-Encoding': 'chunked',
             })
             resp = conn.getresponse()
-            if resp.status:
+            if resp.status == 400:
                 self.findings.append({
                     'type': 'Potential TE.CL Smuggling',
-                    'description': f'Server may be vulnerable to TE.CL request smuggling',
-                    'severity': 'Critical',
-                    'evidence': f'Response: HTTP {resp.status} — manual verification required'
+                    'description': 'Server returned HTTP 400 on a TE.CL ambiguous request — manual verification required',
+                    'severity': 'Medium',
+                    'confidence': 'possible',
+                    'evidence': f'Response: HTTP {resp.status} — not confirmed without a second-request timing probe'
                 })
             conn.close()
-        except:
+        except Exception:
             pass
 
 
@@ -2027,13 +2037,17 @@ class PrototypePollutionScanner:
                 for json_endpoint in ['/api', '/api/v1', '/graphql', '/api/json']:
                     test_url = urljoin(url, json_endpoint)
                     resp = self.client.post(test_url, json_data=payload)
-                    if resp.status_code < 500:
+                    # 404 = endpoint doesn't exist; 405 = method not allowed;
+                    # 415 = wrong content-type — all rejections, not acceptance.
+                    # Only a 2xx means the server processed the body.
+                    if resp.status_code in (200, 201, 202):
                         self.findings.append({
                             'type': 'Potential Server-Side Prototype Pollution',
-                            'description': f'JSON endpoint accepts __proto__ in body — server-side PP risk',
-                            'severity': 'High',
+                            'description': 'JSON endpoint accepted __proto__ in body (HTTP 2xx) — server-side PP risk requires manual verification',
+                            'severity': 'Medium',
+                            'confidence': 'possible',
                             'url': test_url,
-                            'evidence': f'Server did not reject __proto__ key (HTTP {resp.status_code})'
+                            'evidence': f'Server returned HTTP {resp.status_code} for JSON containing __proto__ key'
                         })
                     break  # Only test one endpoint
             except:

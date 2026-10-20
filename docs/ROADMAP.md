@@ -1304,6 +1304,77 @@ verify before production use.
 
 ---
 
+## HydraBrain Autonomous Defense — Brain Phases 12–21
+
+Built on top of the CVM Platform as a WAF + IDS + SOAR layer. All phases are
+done and included in the 1385-test suite. Full architecture in `docs/BRAIN.md`.
+
+### Brain Phase 12 — Core autonomy infrastructure — DONE (2026-10-18)
+- [x] `brain/autonomy.py` — `AutonomyTier` enum (`observe` / `recommend` /
+      `auto_contain` / `auto_remediate`), `AutonomyPolicy`, `PolicyStore`,
+      `_KillSwitch` (`engage()` / `disengage()` / `.engaged`).
+- [x] `brain/incident_log.py` — `open_incident` / `close_incident` / `list_incidents`.
+- [x] `brain/detection.py`, `brain/correlation.py`, `brain/decision.py`,
+      `brain/response.py`, `brain/virtual_patch.py` — the full event pipeline:
+      classify → correlate → decide (tier-gated) → apply (reversible with
+      rollback token + TTL) → virtual WAF patch.
+- [x] Brain DB tables added to `webapp/db.py::init_db()`: `brain_events`,
+      `brain_incidents`, `brain_actions`, `brain_knowledge`.
+- [x] Safety invariants wired throughout: consent + scope gate on every action;
+      reversible-by-default; human approval for irreversible; no self-lockout;
+      FP brakes; append-only signed audit.
+
+### Brain Phases 13–18 — Sensors, learning, hunt loop — DONE (2026-10-18/19)
+- [x] `brain/sensors.py` — `ingest_connector_telemetry()` feeds connector job
+      results into `brain_events`; `AuthorizationError` on missing auth.
+- [x] `brain/learning.py` — EWMA confidence/success-rate updates
+      (`cross_feed_from_scan`); `FINDING_TYPE_TO_ATTACK_CLASS` mapping;
+      `brain_upsert_knowledge` with alpha=0.2 smoothing.
+- [x] `brain/hunt.py` — `run_hunt(asset_id, org_id, ...)` SOAR loop:
+      auth check → poll events → detect → correlate → decide → apply → observe.
+      Returns `HuntReport` dataclass. Bounded by `max_iterations` / `max_seconds`.
+- [x] Full authorization scope (`brain Phase 0`): `scope_hosts`, `scope_paths`,
+      `max_req_per_sec` on `asset_authorizations`; `get_active_authorization` /
+      `check_authorization_scope` in `webapp/db.py`.
+- [x] Agent architecture (Phases 1–11): `agents/` package — `ScanAgent` ABC,
+      `AgentSupervisor`, 28 proper agents (all scanners promoted from
+      `LegacyAdapter`), `agents/toolchain.py` preflight gate, Kali power-tool
+      agents (nuclei / nmap / sqlmap) with required `ToolRequirement`.
+- [x] `ui/tool_readiness_panel.py` — per-agent preflight status panel in Settings.
+- [x] `ui/agent_status_card.py`, `ui/motion.py`, `ui/radar_ring.py`, `ui/xp_bar.py`,
+      `ui/animated_threat_feed.py`, `ui/perf_guard.py` — animated scan HUD.
+- [x] `ui/views/company_scanner_view.py` fully rebuilt with private event queue
+      (fixes double-reader bug) and full agent HUD.
+
+### Brain Phase 19 — Brain API + Celery — DONE (2026-10-19)
+- [x] `webapp/routers/brain.py` extended: `GET /knowledge`, `GET /policy`,
+      `POST /policy`, `POST /hunt`, `GET /actions` (5 new endpoints; full set
+      in `docs/BRAIN.md` §HydraBrain REST API).
+- [x] `webapp/db.py`: `brain_list_knowledge`, `brain_list_authorized_assets`.
+- [x] `webapp/tasks.py`: `run_brain_hunt` Celery task + `_check_due_brain_hunts`
+      beat task (enqueues one hunt per authorized asset per beat tick).
+- [x] `webapp/schemas.py`: `BrainPolicyRequest`, `BrainHuntRequest`.
+- [x] 36 tests (`tests/test_brain_phase19.py`). Full suite: 1323 tests.
+
+### Brain Phase 20 — Scan-findings telemetry bridge — DONE (2026-10-19)
+- [x] `brain/telemetry.py` — `finding_to_signals()` (type/category → signal
+      dict, case-insensitive, category fallback) + `ingest_scan_findings()`
+      (auth-gate → `cross_feed_from_scan` → `brain_insert_event` per finding).
+- [x] `webapp/services/web_scan_service._run()` — brain hook after findings loop
+      (wrapped in bare `except Exception: pass`; brain failures never break scans).
+- [x] 32 tests (`tests/test_brain_phase20.py`). Full suite: 1355 tests.
+
+### Brain Phase 21 — Live Defense full control panel — DONE (2026-10-19)
+- [x] `ui/views/live_defense_view.py` fully rebuilt (was: observe-only incident
+      feed; now: kill switch + tier selector + Run Hunt + 4-tab feeds).
+- [x] Kill switch bar: `brain.autonomy.KILL_SWITCH.engage()/disengage()` in-process.
+- [x] Tier selector: CTkOptionMenu → `get_policy`/`set_policy`.
+- [x] Run Hunt: `brain.hunt.run_hunt()` in daemon thread; result in status line.
+- [x] Tabbed feeds (5 s auto-poll): Incidents / Events / Knowledge / Actions.
+- [x] 30 tests (`tests/test_brain_phase21.py`). Full suite: 1385 tests.
+
+---
+
 **Sequencing rationale**: Phase 1 (APK removal) is executed first because it's the
 user's single most explicit, bounded instruction and touches files that later phases
 would otherwise need to route around. Phase 2 (multi-tenant foundation) comes next

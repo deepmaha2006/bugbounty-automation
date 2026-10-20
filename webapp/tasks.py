@@ -56,6 +56,10 @@ def _run_scheduled_web_scan(asset_id: int, organization_id: int) -> None:
     if asset["verification_status"] != "verified" or asset["authorization_status"] != "authorized":
         logger.info("scheduled scan skipped: asset %s is not currently authorized", asset_id)
         return
+    active_auth = db.get_active_authorization(asset_id, organization_id)
+    if not db.check_authorization_scope(asset["url"], active_auth):
+        logger.info("scheduled scan skipped: asset %s has no active in-scope authorization record", asset_id)
+        return
     if asset["added_by_user_id"] is None:
         logger.info("scheduled scan skipped: asset %s has no owning user to attribute the scan to", asset_id)
         return
@@ -80,3 +84,52 @@ def check_verifications() -> int:
     remediation_service.check_and_finalize_verifications so it's testable
     without a broker, same pattern as check_due_scans."""
     return remediation_service.check_and_finalize_verifications()
+
+
+def _run_brain_hunt(
+    asset_id: int,
+    org_id: int,
+    max_iterations: int = 5,
+    max_seconds: float = 30.0,
+) -> dict:
+    """Run one bounded hunt for an asset and return the serialised HuntReport.
+
+    Imports brain.hunt lazily so the module is only loaded in workers that
+    have the brain package available (same pattern as web_scan_service).
+    """
+    import dataclasses
+    from brain.hunt import run_hunt
+    report = run_hunt(asset_id, org_id,
+                      max_iterations=max_iterations,
+                      max_seconds=max_seconds)
+    return dataclasses.asdict(report)
+
+
+@celery_app.task(name="webapp.tasks.run_brain_hunt")
+def run_brain_hunt(
+    asset_id: int,
+    org_id: int,
+    max_iterations: int = 5,
+    max_seconds: float = 30.0,
+) -> dict:
+    return _run_brain_hunt(asset_id, org_id, max_iterations, max_seconds)
+
+
+def _check_due_brain_hunts(enqueue=None) -> int:
+    """Find every asset that currently has an active authorization and enqueue
+    a brain hunt for each. Returns the count of hunts enqueued.
+
+    `enqueue` defaults to the real Celery delay call; tests inject a plain
+    recording callable to verify the logic without a running broker.
+    """
+    if enqueue is None:
+        enqueue = lambda asset_id, org_id: run_brain_hunt.delay(asset_id, org_id)  # noqa: E731
+    authorized = db.brain_list_authorized_assets()
+    for row in authorized:
+        enqueue(row["asset_id"], row["organization_id"])
+    return len(authorized)
+
+
+@celery_app.task(name="webapp.tasks.check_due_brain_hunts")
+def check_due_brain_hunts() -> int:
+    return _check_due_brain_hunts()

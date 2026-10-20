@@ -114,3 +114,22 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
+
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run hermetic benchmark tests
+        run: python -m pytest benchmark/test_benchmark_hermetic.py -v
+      - name: Run benchmark (live targets skipped in CI — precision gate on hermetic set)
+        run: python benchmark/runner.py
+      - name: Upload RESULTS.md
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark/RESULTS.md

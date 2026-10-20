@@ -141,6 +141,9 @@ class TestScheduledScanExecution:
         uid = fake.create_user("scanowner", "scanowner@hydrax.local", "x", 1)
         aid = fake.add_target("https://execscan.example.com", 1, added_by_user_id=uid)
         fake.update_target_verification(aid, "verified")
+        # Phase 0: must have an active authorization record with no scope constraints.
+        fake.record_asset_authorization(1, aid, uid, "dns_txt", "authorized")
+        monkeypatch.setattr(tasks.db, "get_active_authorization", fake.get_active_authorization)
 
         calls = []
         monkeypatch.setattr(tasks.web_scan_service, "start_web_scan",

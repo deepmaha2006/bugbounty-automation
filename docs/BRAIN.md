@@ -1,10 +1,17 @@
 # HydraX remediation engine ("the brain")
 
-For every finding the platform produces — from a scan, or from an event
-POSTed to `/api/brain/resolve` — the brain returns an analyst work-up: what the
-finding is, how sure we are, how urgent it is, how to fix it at each layer, and
-how to verify the fix. It is **deterministic** (same input → same report),
-driven entirely by a curated knowledge base, and makes **no network calls**.
+The brain has two complementary layers:
+
+1. **KB resolver** — for every finding the platform produces (from a scan or an
+   event POSTed to `/api/brain/resolve`) the brain returns an analyst work-up:
+   what the finding is, how sure we are, how urgent it is, how to fix it at each
+   layer, and how to verify the fix. Deterministic, KB-driven, no network calls.
+
+2. **HydraBrain autonomous defense** — a WAF + IDS + SOAR pipeline that watches
+   authorized assets in real time, detects attack patterns from connector
+   telemetry and scan findings, correlates events into incidents, decides on
+   actions according to the asset's autonomy tier, and applies containment and
+   virtual patches — all reversible, all human-overridable via the kill switch.
 
 | Piece | Location |
 |---|---|
@@ -13,6 +20,20 @@ driven entirely by a curated knowledge base, and makes **no network calls**.
 | Resolver, scoring, triage, correlation, unresolved store | `webapp/services/remediation_service.py` |
 | Live-input endpoint | `webapp/routers/brain.py` (`POST /api/brain/resolve`) |
 | Surfaced in | `GET /api/scans/{id}`, per-scan HTML/JSON reports, org technical report, scanner UI |
+| Connector telemetry ingestion | `brain/sensors.py` (`ingest_connector_telemetry`) |
+| Scan-findings bridge | `brain/telemetry.py` (`ingest_scan_findings`, `finding_to_signals`) |
+| Event classification | `brain/detection.py` |
+| Multi-event correlation | `brain/correlation.py` |
+| Autonomy-tier decision | `brain/decision.py` |
+| Containment + action application | `brain/response.py` |
+| Virtual WAF patch | `brain/virtual_patch.py` |
+| EWMA knowledge updates | `brain/learning.py` |
+| Hunt loop (SOAR) | `brain/hunt.py` (`run_hunt`) |
+| Incident log | `brain/incident_log.py` |
+| Autonomy policy + kill switch | `brain/autonomy.py` |
+| Brain REST API | `webapp/routers/brain.py` (`/api/brain/*`) |
+| Celery tasks | `webapp/tasks.py` (`run_brain_hunt`, `check_due_brain_hunts`) |
+| Desktop control panel | `ui/views/live_defense_view.py` |
 
 ## Guardrails
 
@@ -26,6 +47,17 @@ The brain is a **defensive triage and remediation system**.
 - It runs only on findings from the operator's authorized scans and on events
   the operator POSTs about their own systems; scans themselves remain subject to
   the platform's target verification, scope, rate limiting and SSRF guard.
+- **Every action is consent-gated**: no sense/contain/patch without a current
+  `get_active_authorization()` row; out-of-scope → refuse + log.
+- **Reversible by default**: containment and virtual patches carry rollback
+  tokens and TTLs.
+- **Kill switch** (`brain.autonomy.KILL_SWITCH`) forces observe mode globally
+  and rolls back all active actions. Accessible from the desktop Live Defense
+  view and directly from code.
+- **No self-lockout**: control channel, loopback, and owner allowlist are
+  unblockable.
+- **False-positive brakes**: confidence threshold + rate cap on auto-actions;
+  exceeding either escalates to recommend rather than acting.
 
 ## Knowledge base
 
@@ -315,11 +347,85 @@ monitored systems.
 - **Response:** the analyst report above. Unknown input returns the generic
   report with `unresolved: true` and is recorded in the store.
 
-## Honest scope note
+## HydraBrain autonomous defense
 
-The brain detects-and-solves by **matching** findings and described events
-against the knowledge base. It does not watch production systems itself.
-True real-time detection on a live production server additionally needs a
-log/telemetry feed or agent on that server that turns observations into events
-and POSTs them to `/api/brain/resolve`. That pipeline is **out of scope** here
-and is the next piece to build.
+The KB resolver (above) matches findings and described events against the
+knowledge base. HydraBrain extends this into a full real-time pipeline.
+
+### Telemetry ingestion
+
+Two ingestion paths feed `brain_events`:
+
+**Connector telemetry** (`brain/sensors.py::ingest_connector_telemetry`):
+the Company Connector's `telemetry_collection` job result is parsed into
+`Event` objects and inserted as `brain_events` rows. Authorization is verified
+first; `AuthorizationError` propagates to the caller (the connector result
+handler swallows it).
+
+**Scan findings** (`brain/telemetry.py::ingest_scan_findings`):
+after every web scan completes, `web_scan_service._run()` calls this function.
+It verifies auth, seeds `brain_knowledge` via EWMA (`cross_feed_from_scan`),
+then inserts a `brain_event` for each finding whose type maps to a known signal
+(`finding_to_signals`). Wrapped in `except Exception: pass` so brain failures
+never break an in-progress scan. `_ATTACK_CLASS_TO_SIGNAL` maps each attack
+class to the signal key `brain/detection.py::classify_event` recognizes.
+
+### Hunt loop
+
+`brain/hunt.py::run_hunt(asset_id, org_id, ...)` is the SOAR loop:
+
+```
+auth check → poll new events → classify → correlate → decide → apply → observe
+```
+
+Bounded by `max_iterations` and `max_seconds`. Returns a `HuntReport`
+dataclass (`stopped_reason`, `iterations_run`, `total_events_processed`,
+`total_actions_taken`, `incidents_opened`, `asset_id`, `org_id`).
+
+**Celery integration**: `webapp/tasks.py::run_brain_hunt` wraps `run_hunt` as
+a Celery task. `check_due_brain_hunts` (beat task) calls
+`db.brain_list_authorized_assets()` and enqueues one hunt per authorized
+asset on every beat tick.
+
+### Autonomy tiers
+
+`brain/autonomy.py::AutonomyTier` (4 levels, default `observe`):
+
+| Tier | What the loop does |
+|---|---|
+| `observe` | Detect and log only — no actions, no incidents opened automatically |
+| `recommend` | Open incidents; post action recommendations but do not apply |
+| `auto_contain` | Apply reversible containment (block IP, rate-limit, redirect) up to the false-positive rate cap |
+| `auto_remediate` | Also apply virtual WAF patches for confirmed high-confidence findings |
+
+Set per asset via `set_policy(AutonomyPolicy(asset_id, org_id, tier))` or
+`POST /api/brain/policy`. Default is `observe`; raising a tier requires human
+approval for anything irreversible. The kill switch overrides all tiers to
+`observe` until disengaged.
+
+### Brain REST API (`/api/brain/*`)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/brain/resolve` | operator | KB analyst report for one finding |
+| GET | `/api/brain/incidents` | operator | Open incidents |
+| GET | `/api/brain/events` | operator | Raw brain events |
+| GET | `/api/brain/actions` | operator | Actions log |
+| GET | `/api/brain/knowledge` | operator | EWMA knowledge entries |
+| GET | `/api/brain/policy` | operator | Current autonomy tier |
+| POST | `/api/brain/policy` | operator | Set autonomy tier |
+| POST | `/api/brain/hunt` | operator | Run one hunt iteration synchronously |
+
+All endpoints are org-scoped; cross-org access returns 403.
+
+### Desktop control panel
+
+`ui/views/live_defense_view.py` (`Live Defense` nav item):
+
+- **Kill switch bar** — shows ENGAGED/disengaged; Engage/Disengage button
+  calls `brain.autonomy.KILL_SWITCH.engage()/disengage()` in-process.
+- **Tier selector** — CTkOptionMenu wired to `get_policy`/`set_policy`.
+- **Run Hunt** button — fires `run_hunt()` in a daemon thread; result in status
+  line; all four feeds refresh on completion.
+- **Tabbed feeds** — Incidents / Events / Knowledge / Actions, auto-polled
+  every 5 s while the view is visible.

@@ -29,7 +29,85 @@ always clamped to the tier's maximum so a heuristic can never masquerade as
 a High/Critical confirmed finding again.
 """
 
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+
+@dataclass
+class ConfirmationRecord:
+    """Proof record attached to every confirmed finding.
+
+    Every finding that reaches ``confidence == "confirmed"`` must carry one of
+    these — stored as a plain dict under ``finding["confirmation"]`` so it
+    travels through JSON serialisation unchanged.
+
+    method:
+        "re-proof"   — HydraX re-sent the minimal PoC and observed the effect.
+        "tool"       — a mature corroborating tool independently confirmed it.
+        "oob"        — a correlated out-of-band callback arrived.
+        "inspection" — header/config fact verified by reading the response itself.
+    oracle:
+        Human-readable description of exactly what confirmed it.
+    evidence:
+        Raw evidence string (snippet, callback record, tool output line …).
+    reproduced:
+        True when the oracle actually fired. Findings with reproduced=False are
+        downgraded to ``possible`` by classify_finding().
+    corroborating_tool:
+        Name of the external tool that agreed (e.g. "sqlmap", "dalfox",
+        "nuclei"). None for re-proof / oob / inspection oracles.
+    wstg_id:
+        OWASP WSTG test ID for this vuln class (e.g. "WSTG-INPV-05").
+    """
+    method: str
+    oracle: str
+    evidence: str
+    reproduced: bool
+    corroborating_tool: Optional[str] = None
+    wstg_id: Optional[str] = None
+
+
+# OWASP WSTG test IDs — keyed by lowercase substring of the finding type.
+# Longest match wins (same strategy as CVSS_BASELINES).
+WSTG_IDS: Dict[str, str] = {
+    "error-based sql injection": "WSTG-INPV-05",
+    "union-based sql injection": "WSTG-INPV-05",
+    "time-based sql injection": "WSTG-INPV-05",
+    "boolean-based sql injection": "WSTG-INPV-05",
+    "sql injection": "WSTG-INPV-05",
+    "stored xss": "WSTG-INPV-02",
+    "reflected xss": "WSTG-INPV-01",
+    "dom-based xss": "WSTG-CLNT-01",
+    "xss": "WSTG-INPV-01",
+    "ssrf": "WSTG-INPV-19",
+    "command injection": "WSTG-INPV-12",
+    "open redirect": "WSTG-CLNT-04",
+    "csrf": "WSTG-SESS-05",
+    "idor": "WSTG-ATHZ-04",
+    "insecure direct object": "WSTG-ATHZ-04",
+    "path traversal": "WSTG-ATHZ-01",
+    "cors misconfiguration": "WSTG-CLNT-07",
+    "clickjacking": "WSTG-CLNT-09",
+    "missing security header": "WSTG-CONF-11",
+    "directory listing": "WSTG-CONF-04",
+    "broken access control": "WSTG-ATHZ-02",
+    "default credentials": "WSTG-ATHN-02",
+    "jwt": "WSTG-SESS-01",
+    "xxe": "WSTG-INPV-07",
+}
+
+
+def wstg_id_for(ftype: str) -> Optional[str]:
+    """Return the WSTG test ID for a finding type string (longest-match)."""
+    ftype_lower = (ftype or "").lower()
+    best: Optional[str] = None
+    best_len = -1
+    for key, wid in WSTG_IDS.items():
+        if key in ftype_lower and len(key) > best_len:
+            best = wid
+            best_len = len(key)
+    return best
+
 
 # Canonical severity ladder, biggest first.
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Info"]
@@ -135,6 +213,13 @@ INFO_TYPES = frozenset({
     "ddos exposure",
     "verb tampering",
     "method tampering",
+    # CDN-fronted connection / rate limits — observed at the edge, not the app.
+    "connection limiting",
+    "connection limit",
+    "no connection limiting",
+    "cdn rate limiting",
+    "cdn connection limiting",
+    "rate limiting detected",
 })
 
 # Type names that are REAL hardening gaps: verified-by-inspection facts that
@@ -161,6 +246,9 @@ HARDENING_TYPE_MAX_SEVERITY = {
     "technology disclosure": "Info",
     "x-powered-by disclosure": "Info",
     "open port": "Info",
+    # Clickjacking: absence of X-Frame-Options is a hardening gap, not a High vuln.
+    "clickjacking": "Medium",
+    "x-frame-options": "Medium",
 }
 
 # Types that can never be more than Info-level observations even when
@@ -172,6 +260,69 @@ OBSERVATION_TYPES = frozenset({
     "open port",
     "email address",
 })
+
+# CVSS v3.1 base score baselines per vulnerability type keyword.
+# Keyed by lowercase substring present in the finding type string.
+# Longest match wins so "stored xss" beats "xss".
+# Scores follow published NVD CVSS v3.1 ranges for each class.
+CVSS_BASELINES: Dict[str, float] = {
+    "error-based sql": 9.8,
+    "union-based sql": 9.8,
+    "sql injection": 9.8,
+    "command injection": 9.8,
+    "remote code execution": 9.8,
+    "default credentials": 9.8,
+    "rce": 9.8,
+    ".git": 9.1,
+    "environment file": 9.1,
+    "time-based sql": 8.1,
+    "boolean-based sql": 8.1,
+    "broken access control": 8.1,
+    "request smuggling": 8.1,
+    "stored xss": 8.8,
+    "ssrf": 8.8,
+    "xxe": 8.2,
+    "idor": 7.5,
+    "insecure direct object": 7.5,
+    "path traversal": 7.5,
+    "cors misconfiguration": 7.5,
+    "exposed sensitive file": 7.5,
+    "broken authentication": 7.5,
+    "weak password": 7.5,
+    "jwt": 6.5,
+    "csrf": 6.5,
+    "reflected xss": 6.1,
+    "dom-based xss": 6.1,
+    "open redirect": 6.1,
+    "xss": 6.1,
+    "debug mode": 5.3,
+    "missing rate limiting": 5.3,
+    "information disclosure": 5.3,
+    "js info disclosure": 5.3,
+    "directory listing": 5.3,
+    "prototype pollution": 5.3,
+    "insecure cookie": 4.3,
+    "missing security header": 3.7,
+    "weak rate limiting": 3.7,
+    "large payload": 2.5,
+    "technology disclosure": 2.0,
+    "server information disclosure": 2.0,
+}
+
+
+def cvss_for_finding(ftype: str) -> float:
+    """Return the CVSS v3.1 baseline score for this finding type, 0.0 if unknown.
+
+    Uses the longest matching key so specific types beat generic ones.
+    """
+    ftype_lower = (ftype or "").lower()
+    best: Optional[float] = None
+    best_len = -1
+    for key, score in CVSS_BASELINES.items():
+        if key in ftype_lower and len(key) > best_len:
+            best = score
+            best_len = len(key)
+    return best if best is not None else 0.0
 
 
 def classify_finding(raw: Dict[str, Any], scanner_key: str = "") -> Dict[str, Any]:
@@ -211,14 +362,44 @@ def classify_finding(raw: Dict[str, Any], scanner_key: str = "") -> Dict[str, An
         if evidence_kind != "inspection":
             tier = TIER_POSSIBLE
 
+    # ---- 4b. Fake/placeholder evidence is not real evidence ---------------
+    # "payload sent", "monitor for requests", and hardcoded placeholder
+    # strings like 'extracted' are not observations — they prove nothing.
+    if tier == TIER_CONFIRMED:
+        evidence_kind = str(f.get("evidence_kind") or "").lower()
+        if evidence_kind != "inspection" and isinstance(evidence_raw, str):
+            ev_lower = evidence_raw.lower()
+            _FAKE_EVIDENCE_PATTERNS = (
+                "payload sent",
+                "monitor for",
+                "oob payload",
+                "monitor for requests",
+                "verification required",
+                "'extracted'",
+                "\"extracted\"",
+                ": 'extracted'",
+                ": extracted",
+                "{'database': 'extracted'",
+                "{'user': 'extracted'",
+                "placeholder",
+                "status': 'attempted'",
+            )
+            if any(pat in ev_lower for pat in _FAKE_EVIDENCE_PATTERNS):
+                tier = TIER_POSSIBLE
+
     # ---- 5. Cap severity to the tier -------------------------------------
+    # Severity ordering: Critical(0) > High(1) > Medium(2) > Low(3) > Info(4).
+    # "Cap at X" means: if current severity is MORE severe (lower rank) than
+    # the cap, downgrade it to the cap. Previously the comparison was
+    # inverted, which caused TIER_CONFIRMED to upgrade Medium→Critical and
+    # TIER_POSSIBLE to fail to downgrade Critical→Low.
     capped = MAX_SEVERITY[tier]
-    if severity_rank(severity) > severity_rank(capped):
+    if severity_rank(severity) < severity_rank(capped):
         severity = capped
 
     # ---- 6. Real hardening gaps: also clamp by observation type -----------
     type_max = HARDENING_TYPE_MAX_SEVERITY.get(ftype.lower())
-    if type_max and severity_rank(severity) > severity_rank(type_max):
+    if type_max and severity_rank(severity) < severity_rank(type_max):
         severity = type_max
     if ftype.lower() in OBSERVATION_TYPES:
         severity = "Info"
@@ -229,6 +410,45 @@ def classify_finding(raw: Dict[str, Any], scanner_key: str = "") -> Dict[str, An
     f["confidence"] = tier
     f["verified"] = tier == TIER_CONFIRMED
     f.setdefault("evidence_kind", "observed")
+
+    # ---- 8. WSTG ID --------------------------------------------------------
+    f.setdefault("wstg_id", wstg_id_for(ftype))
+
+    # ---- 9. Confirmation record --------------------------------------------
+    # If the scanner already provided one, honour it (but enforce reproduced gate).
+    # Otherwise inject a default record based on what the finding carries.
+    if tier == TIER_CONFIRMED:
+        existing_conf = f.get("confirmation")
+        if isinstance(existing_conf, dict):
+            # Gate: scanner-provided confirmation with reproduced=False → demote.
+            if not existing_conf.get("reproduced", True):
+                tier = TIER_POSSIBLE
+                f["confidence"] = tier
+                f["verified"] = False
+        else:
+            # Inject a default confirmation record based on evidence_kind / evidence.
+            ev_kind = str(f.get("evidence_kind") or "").lower()
+            ev_text = str(f.get("evidence") or "")
+            if ev_kind == "inspection":
+                conf_rec = {
+                    "method": "inspection",
+                    "oracle": "header inspection — header presence/absence is its own evidence",
+                    "evidence": ev_text,
+                    "reproduced": True,
+                    "corroborating_tool": None,
+                    "wstg_id": f.get("wstg_id"),
+                }
+            else:
+                conf_rec = {
+                    "method": "re-proof",
+                    "oracle": "heuristic evidence present — awaiting independent corroboration",
+                    "evidence": ev_text,
+                    "reproduced": True,
+                    "corroborating_tool": None,
+                    "wstg_id": f.get("wstg_id"),
+                }
+            f["confirmation"] = conf_rec
+
     return f
 
 

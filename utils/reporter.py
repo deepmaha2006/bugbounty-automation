@@ -56,6 +56,24 @@ def normalize_report_data(report_data: Optional[Dict[str, Any]]) -> Dict[str, An
         except Exception:  # noqa: BLE001 — reporter must work standalone
             VERSION = "Unknown"
         data["scanner_version"] = VERSION
+
+    # Deduplicate by (type, url, parameter) — collapse identical scanner
+    # observations (e.g. the same reflected-XSS on the same parameter found
+    # by two code paths) into a single finding so the report is not inflated.
+    raw_findings = data.get("findings") or []
+    seen: set = set()
+    deduped: List[Dict[str, Any]] = []
+    for f in raw_findings:
+        key = (
+            str(f.get("type") or "").lower(),
+            str(f.get("url") or ""),
+            str(f.get("parameter") or ""),
+        )
+        if key not in seen:
+            seen.add(key)
+            deduped.append(f)
+    data["findings"] = deduped
+
     return data
 
 
@@ -147,62 +165,53 @@ class ReportGenerator:
                 f'style="background:{color}">{self._esc(sev)}</span>')
 
     def _count_vulnerabilities(self, report_data: Dict[str, Any]):
-        """Count vulnerabilities by severity."""
+        """Count *confirmed* vulnerabilities by severity (unconfirmed excluded from risk)."""
         findings = normalize_report_data(report_data)["findings"]
         counts = {sev: 0 for sev in self.SEVERITY_ORDER}
         for finding in findings:
+            if finding.get("confidence") not in (None, "", "confirmed"):
+                continue
             sev = finding.get("severity", "Info")
             if sev in counts:
                 counts[sev] += 1
         return counts
 
     def _calculate_cvss_score(self, finding: Dict[str, Any]) -> float:
+        """Return the CVSS v3.1 base score for this finding.
+
+        Priority order:
+        1. Scanner-stored ``cvss_base`` field (allows per-finding overrides).
+        2. Type-keyed baseline table from ``core.finding.CVSS_BASELINES``
+           (longest-match wins, so "stored xss" beats "xss").
+        3. Severity-band fallback when the type is genuinely unknown.
         """
-        Calculate CVSS v3.1 base score based on finding characteristics.
-        This is a simplified implementation - in practice you'd use the full CVSS formula.
-        """
-        # Base metrics estimation based on finding type and severity
+        # 1. Explicit field set by scanner
+        stored = finding.get("cvss_base")
+        if stored is not None:
+            try:
+                return round(float(stored), 1)
+            except (TypeError, ValueError):
+                pass
+
+        # 2. Baseline table lookup
+        try:
+            from core.finding import cvss_for_finding
+            score = cvss_for_finding(finding.get("type", ""))
+            if score > 0.0:
+                return score
+        except ImportError:
+            pass
+
+        # 3. Severity-band fallback (avoids the hardcoded-9.8 problem)
         severity = finding.get("severity", "Info")
-        finding_type = finding.get("type", "").lower()
-
-        # Default values
-        av = self.CVSS_METRICS['Attack Vector']['Network']  # Assume network exploitable
-        ac = self.CVSS_METRICS['Attack Complexity']['Low']  # Assume low complexity
-        pr = self.CVSS_METRICS['Privileges Required']['None']  # Assume no privileges needed
-        ui = self.CVSS_METRICS['User Interaction']['None']  # Assume no user interaction needed
-
-        # Adjust based on finding type
-        if 'xss' in finding_type:
-            ui = self.CVSS_METRICS['User Interaction']['Required']  # XSS usually requires user interaction
-        if 'sqli' in finding_type or 'rce' in finding_type:
-            ac = self.CVSS_METRICS['Attack Complexity']['Low']  # Usually low complexity
-        if 'auth' in finding_type or 'access' in finding_type:
-            pr = self.CVSS_METRICS['Privileges Required']['Low']  # Might require some privileges
-
-        # Scope - assume unchanged for most web vulnerabilities
-        scope = self.CVSS_METRICS['Scope']['Unchanged']
-
-        # Calculate base score (simplified CVSS formula)
-        # Impact sub-score
-        iss = 1 - ((1 - 0.56) * (1 - 0.56) * (1 - 0.56))  # Simplified impact
-        if scope == 6.42:  # Unchanged
-            impact = 6.42 * iss
-        else:  # Changed
-            impact = 7.52 * (iss - 0.029) - 3.25 * pow(iss - 0.02, 15)
-
-        # Exploitability sub-score
-        exploitability = 8.22 * av * ac * pr * ui
-
-        # Base score
-        if impact <= 0:
-            base_score = 0
-        elif scope == 6.42:  # Unchanged
-            base_score = min(impact + exploitability, 10)
-        else:  # Changed
-            base_score = min(1.08 * (impact + exploitability), 10)
-
-        # Round to 1 decimal place
-        return round(base_score, 1)
+        fallback = {
+            "Critical": 9.0,
+            "High": 7.5,
+            "Medium": 5.5,
+            "Low": 3.0,
+            "Info": 0.0,
+        }
+        return fallback.get(severity, 0.0)
 
     def _get_cvss_severity(self, score: float) -> str:
         """Convert CVSS score to severity rating."""
@@ -443,10 +452,12 @@ if is_safe_url(user_supplied_url):
 
         counts = self._count_vulnerabilities(report_data)
         total_findings = sum(counts.values())
+        total_all = len(findings)
+        unconfirmed_count = total_all - total_findings
 
-        # Calculate risk score
+        # Calculate risk score — confirmed findings only
         risk_score = sum(counts[sev] * abs(self.SEVERITY_WEIGHTS[sev]) for sev in self.SEVERITY_ORDER)
-        max_possible_score = len(findings) * 40 if findings else 40  # Assuming all Critical
+        max_possible_score = total_findings * 40 if total_findings else 40  # Assuming all Critical
         risk_percentage = (risk_score / max_possible_score * 100) if max_possible_score > 0 else 0
 
         # Determine overall risk level
@@ -466,8 +477,10 @@ if is_safe_url(user_supplied_url):
             risk_level = "MINIMAL"
             risk_color = "#2563eb"
 
-        # Calculate CVSS scores
-        cvss_scores = [self._calculate_cvss_score(f) for f in findings]
+        # Calculate CVSS scores over confirmed findings only — unconfirmed
+        # heuristics must not inflate the average or maximum CVSS values.
+        confirmed_findings = [f for f in findings if f.get("confidence") in (None, "", "confirmed")]
+        cvss_scores = [self._calculate_cvss_score(f) for f in confirmed_findings]
         avg_cvss = sum(cvss_scores) / len(cvss_scores) if cvss_scores else 0
         max_cvss = max(cvss_scores) if cvss_scores else 0
 
@@ -480,7 +493,7 @@ if is_safe_url(user_supplied_url):
 
             <h3>Overview</h3>
             <p>This report summarizes the results of a comprehensive security assessment conducted on {self._esc(target)}.
-            The assessment identified {total_findings} security vulnerabilities across multiple severity levels.</p>
+            The assessment identified {total_findings} confirmed security vulnerabilities across multiple severity levels.{f" An additional {unconfirmed_count} possible/informational finding(s) were logged but are excluded from counts and risk calculation (see &ldquo;Attempted&nbsp;&amp;&nbsp;Unconfirmed&rdquo; below)." if unconfirmed_count else ""}</p>
 
             <h3>Risk Assessment</h3>
             <div class="risk-assessment">
@@ -671,6 +684,23 @@ if is_safe_url(user_supplied_url):
             margin: 5px;
             font-weight: bold;
         }}
+        .findings-unconfirmed {{
+            background-color: #f8f9fa;
+            margin: 20px 0;
+            padding: 20px;
+            border-left: 4px solid #95a5a6;
+        }}
+        .finding-card-unconfirmed {{
+            background-color: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 5px;
+            margin: 10px 0;
+            overflow: hidden;
+            opacity: 0.85;
+        }}
+        .finding-card-unconfirmed .finding-header {{
+            background-color: #f0f0f0;
+        }}
     </style>
 </head>
 <body>
@@ -687,15 +717,18 @@ if is_safe_url(user_supplied_url):
             <h2>Detailed Findings</h2>
         """
 
-        if not findings:
+        # Split confirmed (reportable) from unconfirmed (informational only)
+        _confirmed = [f for f in findings if f.get("confidence") in (None, "", "confirmed")]
+        _unconfirmed = [f for f in findings if f.get("confidence") not in (None, "", "confirmed")]
+
+        if not _confirmed:
             html_content += """
-            <p>No vulnerabilities were identified during this assessment.</p>
+            <p>No confirmed vulnerabilities were identified during this assessment.</p>
             """
         else:
-            # Sort findings by severity
-            sorted_findings = sorted(findings, key=lambda f: self.SEVERITY_ORDER.index(f.get("severity", "Info")))
+            sorted_confirmed = sorted(_confirmed, key=lambda f: self.SEVERITY_ORDER.index(f.get("severity", "Info")))
 
-            for i, finding in enumerate(sorted_findings, 1):
+            for i, finding in enumerate(sorted_confirmed, 1):
                 severity = finding.get("severity", "Info")
                 color = self.SEVERITY_COLORS.get(severity, "#95a5a6")
                 cvss_score = self._calculate_cvss_score(finding)
@@ -728,9 +761,52 @@ if is_safe_url(user_supplied_url):
                 </div>
                 """
 
-        html_content += f"""
+        html_content += """
         </div>
+        """
 
+        # Unconfirmed section — informational, not counted in risk
+        if _unconfirmed:
+            html_content += """
+        <div class="findings-unconfirmed">
+            <h2>Attempted &amp; Unconfirmed &#8212; Informational Only</h2>
+            <p style="color:#555;font-style:italic;">These observations are <strong>not counted</strong> in the risk score or
+            findings summary. No exploit was demonstrated. They are recorded here for
+            completeness; they may warrant manual review but do not represent confirmed
+            vulnerabilities.</p>
+            """
+            sorted_unconfirmed = sorted(_unconfirmed,
+                                        key=lambda f: self.SEVERITY_ORDER.index(f.get("severity", "Info")))
+            for j, finding in enumerate(sorted_unconfirmed, 1):
+                severity = finding.get("severity", "Info")
+                color = self.SEVERITY_COLORS.get(severity, "#95a5a6")
+                confidence = finding.get("confidence", "possible")
+                html_content += f"""
+            <div class="finding-card-unconfirmed">
+                <div class="finding-header">
+                    <h4>Observation #{j}: {self._esc(finding.get('type', 'Unknown'))}</h4>
+                    <p>
+                        <span class="sev-badge" style="background:{color}">{severity}</span>
+                        <span class="sev-badge" style="background:#95a5a6">{self._esc(confidence)}</span>
+                    </p>
+                    <p><strong>URL:</strong> <a href="{self._safe_href(finding.get('url', '#'))}" target="_blank" rel="noopener noreferrer">{self._esc(finding.get('url', 'N/A'))}</a></p>
+                </div>
+                <div class="finding-body">
+                    <p><strong>Description:</strong> {self._esc(finding.get('description', 'No description provided'))}</p>
+                    {f"<p><strong>Parameter:</strong> {self._esc(finding.get('parameter', ''))}</p>" if finding.get('parameter') else ""}
+                    <div class="evidence">
+                        <strong>Observation:</strong><br>
+                        {self._esc(finding.get('evidence', 'No evidence provided')).replace(chr(10), '<br>')}
+                    </div>
+                </div>
+            </div>
+                """
+            html_content += """
+        </div>
+            """
+
+        confirmed_count = len(_confirmed)
+        html_content += f"""
         <div class="appendix">
             <h2>Appendix</h2>
             <div class="confidentiality">
@@ -743,7 +819,7 @@ if is_safe_url(user_supplied_url):
             Unauthorized testing of systems is illegal and punishable by law.</p>
 
             <p><strong>Tool Version:</strong> HydraX {report_data.get('scanner_version', 'Unknown')}</p>
-            <p><strong>Findings Count:</strong> {len(findings)}</p>
+            <p><strong>Findings Count:</strong> {confirmed_count} confirmed{f", {len(_unconfirmed)} unconfirmed (not counted)" if _unconfirmed else ""}</p>
             <p><strong>Report ID:</strong> BB-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}</p>
         </div>
 

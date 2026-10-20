@@ -28,7 +28,7 @@ import pathlib
 import sys
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent
-PACKAGES = ("webapp", "core", "scanners", "config", "utils", "ui", "connector", "scripts")
+PACKAGES = ("webapp", "core", "scanners", "config", "utils", "ui", "connector", "scripts", "agents", "brain", "pentest")
 
 WEBAPP_MODULES = [
     "webapp.db", "webapp.config", "webapp.security", "webapp.schemas",
@@ -51,14 +51,62 @@ WEBAPP_MODULES = [
 ]
 
 UI_MODULES = [
-    "ui.theme", "ui.widgets", "ui.main_window", "ui.dialogs.scope_editor",
+    "ui.theme", "ui.widgets", "ui.tool_readiness_panel", "ui.motion",
+    "ui.perf_guard", "ui.agent_status_card",
+    "ui.radar_ring", "ui.xp_bar", "ui.animated_threat_feed",
+    "ui.main_window",
+    "ui.dialogs.scope_editor",
     "ui.views.dashboard_view", "ui.views.website_scanner_view",
     "ui.views.company_scanner_view",
     "ui.views.results_view", "ui.views.reports_view", "ui.views.settings_view",
     "ui.views.profile_view",
+    "ui.views.live_defense_view",
+    "ui.views.pentest_view",
 ]
 
-ALL_MODULES = WEBAPP_MODULES + UI_MODULES
+AGENT_MODULES = [
+    "agents.base", "agents.registry", "agents.toolchain",
+    "agents._legacy_adapter", "agents.supervisor",
+    "agents.xss_agent", "agents.sqli_agent", "agents.csrf_agent",
+    "agents.ssrf_agent", "agents.rce_agent", "agents.file_upload_agent",
+    "agents.open_redirect_agent", "agents.clickjack_agent",
+    "agents.bac_agent", "agents.auth_session_agent", "agents.business_logic_agent",
+    "agents.sec_misconfig_agent", "agents.sub_takeover_agent",
+    "agents.info_disclosure_agent", "agents.cloud_agent",
+    "agents.recon_agent", "agents.ddos_agent",
+    "agents.api_agent", "agents.proto_pollution_agent", "agents.xml_agent",
+    "agents.websocket_agent", "agents.llm_agent", "agents.mobile_agent",
+    "agents.cache_agent", "agents.smuggling_agent",
+    "agents.nuclei_agent", "agents.nmap_agent", "agents.sqlmap_agent",
+    "agents.payloads.xss", "agents.payloads.sqli", "agents.payloads.ssrf",
+    "agents.payloads.rce", "agents.payloads.open_redirect",
+]
+
+BRAIN_MODULES = [
+    "brain.autonomy", "brain.incident_log", "brain.sensors",
+    "brain.detection", "brain.correlation",
+    "brain.decision", "brain.response", "brain.virtual_patch",
+    "brain.learning", "brain.hunt", "brain.telemetry",
+]
+
+PENTEST_MODULES = [
+    "pentest.llm.provider", "pentest.llm.budget",
+    "pentest.hypotheses", "pentest.workspace",
+    "pentest.recon", "pentest.reconcile", "pentest.pipeline",
+    "pentest.code_analysis",
+    "pentest.exploit.action_schema",
+    "pentest.exploit.executor",
+    "pentest.exploit.xss_exploiter",
+    "pentest.exploit.sqli_exploiter",
+    "pentest.exploit.ssrf_exploiter",
+    "pentest.exploit.authn_exploiter",
+    "pentest.exploit.authz_exploiter",
+    "pentest.exploit.rce_exploiter",
+    "pentest.exploit.open_redirect_exploiter",
+    "pentest.report",
+]
+
+ALL_MODULES = WEBAPP_MODULES + UI_MODULES + AGENT_MODULES + BRAIN_MODULES + PENTEST_MODULES
 
 
 def syntax_errors() -> list:

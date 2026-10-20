@@ -66,6 +66,9 @@ reports/*.html
 reports/*.json
 reports/*.sarif
 
+# Pentest session workspaces (runtime output, not source)
+pentest_workspaces/
+
 # Secrets - never commit
 .env
 .env.*

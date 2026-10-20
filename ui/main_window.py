@@ -37,6 +37,8 @@ from ui.views.results_view import ResultsView
 from ui.views.reports_view import ReportsView
 from ui.views.settings_view import SettingsView, load_settings
 from ui.views.profile_view import ProfileView
+from ui.views.live_defense_view import LiveDefenseView
+from ui.views.pentest_view import PentestView
 from ui.widgets import NavButton
 
 NAV_ITEMS = [
@@ -50,6 +52,8 @@ NAV_ITEMS = [
     ("reports", "▥", "Reports"),
     ("settings", "⚙", "Settings"),
     ("profile", "◉", "Profile"),
+    ("live_defense", "⬡", "Live Defense"),
+    ("pentest",      "⚔", "AI PenTest"),
 ]
 
 QUICK_PRESETS = {
@@ -184,7 +188,9 @@ class BugBountyApp(ctk.CTk):
             "results": ResultsView(self.content_frame, self),
             "reports": ReportsView(self.content_frame, self),
             "settings": SettingsView(self.content_frame, self),
-            "profile": ProfileView(self.content_frame, self)
+            "profile": ProfileView(self.content_frame, self),
+            "live_defense": LiveDefenseView(self.content_frame, self),
+            "pentest":      PentestView(self.content_frame, self),
         }
 
         # Show dashboard by default

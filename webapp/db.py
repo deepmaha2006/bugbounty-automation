@@ -345,6 +345,11 @@ def init_db() -> None:
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_asset_auth_asset_id ON asset_authorizations(asset_id)")
 
+                # Scope constraints added in Phase 0 authorization scope work.
+                cur.execute("ALTER TABLE asset_authorizations ADD COLUMN IF NOT EXISTS scope_hosts JSONB")
+                cur.execute("ALTER TABLE asset_authorizations ADD COLUMN IF NOT EXISTS scope_paths TEXT")
+                cur.execute("ALTER TABLE asset_authorizations ADD COLUMN IF NOT EXISTS max_req_per_sec NUMERIC(8,2)")
+
                 # 5. organization_id on every other security-sensitive table —
                 #    denormalized from the nearest owning row so every table can be
                 #    scoped directly without always joining back to users/scans.
@@ -717,6 +722,85 @@ def init_db() -> None:
                         END IF;
                     END $$;
                 """)
+
+                # ---- HydraBrain tables (Phase 12) ----------------------------------------
+                # All four tables are org-scoped and asset-scoped.  asset_id MUST reference
+                # a live row in asset_authorizations; that FK is enforced at the application
+                # layer (brain/ modules check get_active_authorization before writing).
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS brain_events (
+                        id          BIGSERIAL PRIMARY KEY,
+                        asset_id    INTEGER NOT NULL,
+                        org_id      INTEGER NOT NULL,
+                        ts          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                        src_ip      TEXT,
+                        method      TEXT,
+                        path        TEXT,
+                        status      INTEGER,
+                        signals     JSONB NOT NULL DEFAULT '{}'
+                    );
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_brain_events_asset ON brain_events(asset_id, org_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_brain_events_ts ON brain_events(ts)")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS brain_incidents (
+                        id          BIGSERIAL PRIMARY KEY,
+                        asset_id    INTEGER NOT NULL,
+                        org_id      INTEGER NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        severity    TEXT NOT NULL DEFAULT 'medium',
+                        first_seen  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                        last_seen   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                        state       TEXT NOT NULL DEFAULT 'open',
+                        finding_id  INTEGER,
+                        summary     TEXT,
+                        CONSTRAINT  brain_incidents_state_check
+                            CHECK (state IN ('open','contained','remediated','closed'))
+                    );
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_brain_incidents_asset ON brain_incidents(asset_id, org_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_brain_incidents_fp ON brain_incidents(fingerprint)")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS brain_actions (
+                        id              BIGSERIAL PRIMARY KEY,
+                        incident_id     BIGINT,
+                        asset_id        INTEGER NOT NULL,
+                        org_id          INTEGER NOT NULL,
+                        ts              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                        type            TEXT NOT NULL,
+                        params          JSONB NOT NULL DEFAULT '{}',
+                        tier_at_time    TEXT NOT NULL,
+                        status          TEXT NOT NULL DEFAULT 'proposed',
+                        approver        TEXT,
+                        rollback_token  TEXT,
+                        CONSTRAINT brain_actions_status_check
+                            CHECK (status IN ('proposed','approved','applied','rolled_back','failed'))
+                    );
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_brain_actions_incident ON brain_actions(incident_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_brain_actions_asset ON brain_actions(asset_id, org_id)")
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS brain_knowledge (
+                        id                    BIGSERIAL PRIMARY KEY,
+                        asset_id              INTEGER NOT NULL,
+                        org_id                INTEGER NOT NULL,
+                        signature_fingerprint TEXT NOT NULL,
+                        attack_class          TEXT NOT NULL,
+                        recommended_action    JSONB NOT NULL DEFAULT '{}',
+                        remediation           JSONB NOT NULL DEFAULT '{}',
+                        confidence            NUMERIC(5,4) NOT NULL DEFAULT 0.5,
+                        times_seen            INTEGER NOT NULL DEFAULT 1,
+                        success_rate          NUMERIC(5,4) NOT NULL DEFAULT 0.0,
+                        updated_at            TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                        UNIQUE (asset_id, org_id, signature_fingerprint)
+                    );
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_brain_knowledge_asset ON brain_knowledge(asset_id, org_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_brain_knowledge_fp ON brain_knowledge(signature_fingerprint)")
     finally:
         _put_conn(conn)
 
@@ -1329,7 +1413,10 @@ def get_target(target_id: int, organization_id: int) -> Optional[Dict]:
 
 def record_asset_authorization(organization_id: int, asset_id: int,
                                authorized_by_user_id: Optional[int], method: str,
-                               status: str, evidence: Optional[Dict] = None) -> None:
+                               status: str, evidence: Optional[Dict] = None,
+                               scope_hosts: Optional[List] = None,
+                               scope_paths: Optional[str] = None,
+                               max_req_per_sec: Optional[float] = None) -> None:
     """One row per authorization decision (spec §3 asset_authorizations)."""
     conn = _get_conn()
     try:
@@ -1338,13 +1425,72 @@ def record_asset_authorization(organization_id: int, asset_id: int,
                 cur.execute(
                     """INSERT INTO asset_authorizations(
                            organization_id, asset_id, authorized_by_user_id,
-                           method, status, evidence
-                       ) VALUES(%s, %s, %s, %s, %s, %s)""",
+                           method, status, evidence,
+                           scope_hosts, scope_paths, max_req_per_sec
+                       ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (organization_id, asset_id, authorized_by_user_id, method, status,
-                     Json(evidence) if evidence else None)
+                     Json(evidence) if evidence else None,
+                     Json(scope_hosts) if scope_hosts is not None else None,
+                     scope_paths,
+                     max_req_per_sec)
                 )
     finally:
         _put_conn(conn)
+
+
+def get_active_authorization(asset_id: int, organization_id: int) -> Optional[Dict]:
+    """Return the most recent non-expired 'authorized' row for an asset, or None."""
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT * FROM asset_authorizations
+                   WHERE asset_id = %s AND organization_id = %s
+                     AND status = 'authorized'
+                     AND (expires_at IS NULL OR expires_at > NOW())
+                   ORDER BY created_at DESC LIMIT 1""",
+                (asset_id, organization_id)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        _put_conn(conn)
+
+
+def check_authorization_scope(url: str, auth: Optional[Dict]) -> bool:
+    """Return True iff url falls within the scope constraints of an authorization record.
+
+    None auth → False.  Empty/null scope_hosts → all hosts pass.
+    Empty/null scope_paths → all paths pass.
+    """
+    if auth is None:
+        return False
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(url)
+    host = (parsed.netloc or "").lower().split(":")[0]
+
+    scope_hosts = auth.get("scope_hosts") or []
+    if scope_hosts:
+        host_ok = False
+        for allowed in scope_hosts:
+            allowed = allowed.lower()
+            if allowed.startswith("*."):
+                if host.endswith(allowed[1:]) or host == allowed[2:]:
+                    host_ok = True
+                    break
+            elif host == allowed:
+                host_ok = True
+                break
+        if not host_ok:
+            return False
+
+    scope_paths = auth.get("scope_paths") or ""
+    if scope_paths:
+        path = parsed.path or "/"
+        if not path.startswith(scope_paths):
+            return False
+
+    return True
 
 
 def get_target_by_url(url: str, organization_id: int) -> Optional[Dict]:
@@ -2553,7 +2699,11 @@ def list_remediation_comments(task_id: int) -> List[Dict]:
 
 # --- Company Connector (Phase 8) --------------------------------------------
 JOB_TYPES = ("inventory_check", "configuration_check",
-            "vulnerability_assessment", "telemetry_collection")
+             "vulnerability_assessment", "telemetry_collection",
+             "collect_telemetry",
+             "block_source", "unblock_source",
+             "apply_waf_rule", "remove_waf_rule",
+             "kill_session")
 
 
 def create_enrollment_token(organization_id: int, created_by_user_id: int,
@@ -3143,5 +3293,264 @@ def get_audit_log(organization_id: int, limit: int = 100, offset: int = 0) -> Li
                 if row['timestamp']:
                     row['timestamp'] = row['timestamp'].isoformat()
             return rows
+    finally:
+        _put_conn(conn)
+
+
+# ---------------------------------------------------------------------------
+# HydraBrain CRUD (Phase 12)
+# ---------------------------------------------------------------------------
+
+def brain_insert_event(asset_id: int, org_id: int, src_ip: Optional[str],
+                       method: Optional[str], path: Optional[str],
+                       status: Optional[int], signals: Dict) -> int:
+    conn = _get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO brain_events
+                       (asset_id, org_id, ts, src_ip, method, path, status, signals)
+                       VALUES (%s, %s, NOW(), %s, %s, %s, %s, %s) RETURNING id""",
+                    (asset_id, org_id, src_ip, method, path, status, Json(signals))
+                )
+                return cur.fetchone()[0]
+    finally:
+        _put_conn(conn)
+
+
+def brain_upsert_incident(asset_id: int, org_id: int, fingerprint: str,
+                          severity: str, summary: str = "",
+                          finding_id: Optional[int] = None) -> int:
+    """Return the incident id (creating or updating last_seen)."""
+    conn = _get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO brain_incidents
+                       (asset_id, org_id, fingerprint, severity, summary, finding_id)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       ON CONFLICT DO NOTHING RETURNING id""",
+                    (asset_id, org_id, fingerprint, severity, summary, finding_id)
+                )
+                row = cur.fetchone()
+                if row:
+                    return row[0]
+                # Row already existed — bump last_seen and return its id.
+                cur.execute(
+                    """UPDATE brain_incidents SET last_seen = NOW()
+                       WHERE asset_id = %s AND org_id = %s AND fingerprint = %s
+                       RETURNING id""",
+                    (asset_id, org_id, fingerprint)
+                )
+                return cur.fetchone()[0]
+    finally:
+        _put_conn(conn)
+
+
+def brain_get_incident(incident_id: int, org_id: int) -> Optional[Dict]:
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM brain_incidents WHERE id = %s AND org_id = %s",
+                (incident_id, org_id)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        _put_conn(conn)
+
+
+def brain_list_incidents(asset_id: int, org_id: int,
+                         state: Optional[str] = None, limit: int = 100) -> List[Dict]:
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if state:
+                cur.execute(
+                    """SELECT * FROM brain_incidents
+                       WHERE asset_id = %s AND org_id = %s AND state = %s
+                       ORDER BY last_seen DESC LIMIT %s""",
+                    (asset_id, org_id, state, limit)
+                )
+            else:
+                cur.execute(
+                    """SELECT * FROM brain_incidents
+                       WHERE asset_id = %s AND org_id = %s
+                       ORDER BY last_seen DESC LIMIT %s""",
+                    (asset_id, org_id, limit)
+                )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        _put_conn(conn)
+
+
+def brain_insert_action(asset_id: int, org_id: int, incident_id: Optional[int],
+                        action_type: str, params: Dict, tier_at_time: str,
+                        status: str = "proposed",
+                        rollback_token: Optional[str] = None) -> int:
+    conn = _get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO brain_actions
+                       (asset_id, org_id, incident_id, type, params, tier_at_time,
+                        status, rollback_token)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                    (asset_id, org_id, incident_id, action_type, Json(params),
+                     tier_at_time, status, rollback_token)
+                )
+                return cur.fetchone()[0]
+    finally:
+        _put_conn(conn)
+
+
+def brain_update_action_status(action_id: int, org_id: int,
+                               status: str, approver: Optional[str] = None) -> bool:
+    conn = _get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE brain_actions SET status = %s, approver = %s
+                       WHERE id = %s AND org_id = %s""",
+                    (status, approver, action_id, org_id)
+                )
+                return cur.rowcount > 0
+    finally:
+        _put_conn(conn)
+
+
+def brain_get_action(action_id: int, org_id: int) -> Optional[Dict]:
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM brain_actions WHERE id = %s AND org_id = %s",
+                (action_id, org_id)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        _put_conn(conn)
+
+
+def brain_list_actions(asset_id: int, org_id: int,
+                       status_filter: Optional[List[str]] = None,
+                       limit: int = 200) -> List[Dict]:
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if status_filter:
+                placeholders = ",".join(["%s"] * len(status_filter))
+                cur.execute(
+                    f"""SELECT * FROM brain_actions
+                        WHERE asset_id = %s AND org_id = %s
+                          AND status IN ({placeholders})
+                        ORDER BY id DESC LIMIT %s""",
+                    (asset_id, org_id, *status_filter, limit)
+                )
+            else:
+                cur.execute(
+                    """SELECT * FROM brain_actions
+                       WHERE asset_id = %s AND org_id = %s
+                       ORDER BY id DESC LIMIT %s""",
+                    (asset_id, org_id, limit)
+                )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        _put_conn(conn)
+
+
+def brain_upsert_knowledge(asset_id: int, org_id: int, signature_fingerprint: str,
+                           attack_class: str, recommended_action: Dict,
+                           remediation: Dict, confidence: float = 0.5) -> int:
+    conn = _get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO brain_knowledge
+                       (asset_id, org_id, signature_fingerprint, attack_class,
+                        recommended_action, remediation, confidence)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (asset_id, org_id, signature_fingerprint) DO UPDATE
+                         SET attack_class       = EXCLUDED.attack_class,
+                             recommended_action = EXCLUDED.recommended_action,
+                             remediation        = EXCLUDED.remediation,
+                             confidence         = EXCLUDED.confidence,
+                             times_seen         = brain_knowledge.times_seen + 1,
+                             updated_at         = NOW()
+                       RETURNING id""",
+                    (asset_id, org_id, signature_fingerprint, attack_class,
+                     Json(recommended_action), Json(remediation), confidence)
+                )
+                return cur.fetchone()[0]
+    finally:
+        _put_conn(conn)
+
+
+def brain_get_knowledge(asset_id: int, org_id: int,
+                        signature_fingerprint: str) -> Optional[Dict]:
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT * FROM brain_knowledge
+                   WHERE asset_id = %s AND org_id = %s AND signature_fingerprint = %s""",
+                (asset_id, org_id, signature_fingerprint)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        _put_conn(conn)
+
+
+def brain_list_knowledge(asset_id: int, org_id: int, limit: int = 100) -> List[Dict]:
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT * FROM brain_knowledge
+                   WHERE asset_id = %s AND org_id = %s
+                   ORDER BY confidence DESC LIMIT %s""",
+                (asset_id, org_id, limit)
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        _put_conn(conn)
+
+
+def brain_list_authorized_assets() -> List[Dict]:
+    """All asset/org pairs that currently have an active authorization.
+    Used by the brain-hunt scheduler to find assets to hunt against."""
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT DISTINCT asset_id, organization_id
+                   FROM asset_authorizations
+                   WHERE status = 'authorized'
+                     AND (expires_at IS NULL OR expires_at > NOW())"""
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        _put_conn(conn)
+
+
+def brain_list_events(asset_id: int, org_id: int, limit: int = 200) -> List[Dict]:
+    conn = _get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT * FROM brain_events
+                   WHERE asset_id = %s AND org_id = %s
+                   ORDER BY ts DESC LIMIT %s""",
+                (asset_id, org_id, limit)
+            )
+            return [dict(r) for r in cur.fetchall()]
     finally:
         _put_conn(conn)

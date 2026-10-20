@@ -24,10 +24,14 @@ class SecurityMisconfigScanner:
         'Content-Security-Policy': 'Missing CSP header',
         'X-Content-Type-Options': 'Missing X-Content-Type-Options header',
         'X-Frame-Options': 'Missing clickjacking protection header',
-        'X-XSS-Protection': 'Missing X-XSS-Protection header',
+        # X-XSS-Protection omitted: deprecated since 2019; modern browsers ignore it
+        # and enabling it can introduce new vulnerabilities. CSP is the replacement.
         'Referrer-Policy': 'Missing Referrer-Policy header',
         'Permissions-Policy': 'Missing Permissions-Policy header',
-        'Set-Cookie': 'Cookies set without Secure/HttpOnly flags (check)',
+        # Set-Cookie omitted: cookie flag checks happen in _check_security_headers
+        # only when a Set-Cookie header is actually present. Flagging its absence
+        # as a finding makes no sense — a page that sets no cookies cannot be missing
+        # cookie flags.
     }
 
     def __init__(self):
@@ -74,7 +78,10 @@ class SecurityMisconfigScanner:
                     self.findings.append({
                         'type': 'Missing Security Header',
                         'description': msg,
-                        'severity': 'Medium',
+                        'severity': 'Low',
+                        # evidence_kind=inspection: the absence of a header IS
+                        # the evidence — no exploit needed to confirm it.
+                        'evidence_kind': 'inspection',
                         'evidence': f'Header "{header}" not present in response'
                     })
 
@@ -86,6 +93,7 @@ class SecurityMisconfigScanner:
                         'type': 'Insecure Cookie',
                         'description': 'Cookie missing Secure flag',
                         'severity': 'Medium',
+                        'evidence_kind': 'inspection',
                         'evidence': f'Cookie: {cookie[:100]}'
                     })
                 if 'HttpOnly' not in cookie:
@@ -93,6 +101,7 @@ class SecurityMisconfigScanner:
                         'type': 'Insecure Cookie',
                         'description': 'Cookie missing HttpOnly flag',
                         'severity': 'Medium',
+                        'evidence_kind': 'inspection',
                         'evidence': f'Cookie: {cookie[:100]}'
                     })
 

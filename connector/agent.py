@@ -164,11 +164,337 @@ def _job_telemetry_collection(scope: dict) -> dict:
     return telemetry
 
 
+def _job_collect_telemetry(scope: dict) -> dict:
+    """Read-only: tail the last N lines of admin-supplied log files and return them
+    as structured events for HydraBrain ingestion.
+
+    scope keys:
+      log_files          — list of absolute paths to tail (required; refuses empty)
+      max_lines_per_file — max lines to return per file (default 200, hard cap 1000)
+
+    Each returned entry is {'source_file': str, 'line': str, 'collected_at': ISO8601}.
+    On per-file I/O error the entry is {'source_file': str, 'error': str}.
+
+    Safety: the handler opens files read-only and never follows symlinks to paths
+    outside what the admin explicitly supplied.  It does not eval/execute any line
+    it reads.
+    """
+    import datetime as _dt
+
+    log_files = scope.get("log_files") or []
+    max_lines = min(int(scope.get("max_lines_per_file", 200)), 1000)
+    collected_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    entries = []
+    for path in log_files:
+        try:
+            # Open read-only; do not follow symlinks to guard against TOCTOU.
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+            for raw in lines[-max_lines:]:
+                raw = raw.rstrip("\n")
+                if raw:
+                    entries.append({
+                        "source_file": path,
+                        "line": raw,
+                        "collected_at": collected_at,
+                    })
+        except OSError as exc:
+            entries.append({"source_file": path, "error": str(exc)})
+
+    return {
+        "hostname": socket.gethostname(),
+        "collected_at": collected_at,
+        "log_entries": entries,
+    }
+
+
+def _job_block_source(scope: dict) -> dict:
+    """Contain an attacking source IP using a platform firewall rule.
+
+    scope keys:
+      src_ip          — IP address to block (required; refuses loopback/empty)
+      ttl_seconds     — seconds until the block is auto-removed (default 3600)
+      rollback_token  — opaque token echoed back so the platform can match
+                        the corresponding unblock_source job
+
+    Safety: loopback (127.x / ::1), empty, and unspecified addresses are
+    refused; the handler never executes arbitrary shell commands — it calls
+    platform-specific firewall APIs only.
+    """
+    import datetime as _dt
+    import sys as _sys
+
+    src_ip = scope.get("src_ip", "")
+    rollback_token = scope.get("rollback_token", "")
+
+    _REFUSE = {"", "127.0.0.1", "::1", "0.0.0.0", "localhost"}
+    if not src_ip or src_ip in _REFUSE or src_ip.startswith("127."):
+        return {"blocked": False, "src_ip": src_ip,
+                "error": "refused: self-lockout guard",
+                "rollback_token": rollback_token}
+
+    method = "unsupported"
+    error = None
+    try:
+        if _sys.platform == "win32":
+            import subprocess as _sp
+            rule_name = f"HydraX-block-{src_ip}"
+            _sp.run(
+                ["netsh", "advfirewall", "firewall", "add", "rule",
+                 f"name={rule_name}", "dir=in", "action=block",
+                 f"remoteip={src_ip}", "enable=yes"],
+                capture_output=True, timeout=10
+            )
+            method = "windows_firewall"
+        else:
+            import subprocess as _sp
+            _sp.run(
+                ["iptables", "-I", "INPUT", "-s", src_ip, "-j", "DROP"],
+                capture_output=True, timeout=10
+            )
+            method = "iptables"
+    except (FileNotFoundError, OSError, Exception) as exc:
+        error = str(exc)
+        method = "unsupported"
+
+    result = {
+        "blocked": error is None and method != "unsupported",
+        "src_ip": src_ip,
+        "method": method,
+        "rollback_token": rollback_token,
+        "blocked_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    if error:
+        result["error"] = error
+    return result
+
+
+def _job_unblock_source(scope: dict) -> dict:
+    """Remove a firewall block added by block_source.
+
+    scope keys:
+      src_ip         — IP address to unblock (required)
+      rollback_token — token from the original block_source result
+    """
+    import datetime as _dt
+    import sys as _sys
+
+    src_ip = scope.get("src_ip", "")
+    rollback_token = scope.get("rollback_token", "")
+
+    if not src_ip:
+        return {"unblocked": False, "error": "src_ip required",
+                "rollback_token": rollback_token}
+
+    method = "unsupported"
+    error = None
+    try:
+        if _sys.platform == "win32":
+            import subprocess as _sp
+            rule_name = f"HydraX-block-{src_ip}"
+            _sp.run(
+                ["netsh", "advfirewall", "firewall", "delete", "rule",
+                 f"name={rule_name}"],
+                capture_output=True, timeout=10
+            )
+            method = "windows_firewall"
+        else:
+            import subprocess as _sp
+            _sp.run(
+                ["iptables", "-D", "INPUT", "-s", src_ip, "-j", "DROP"],
+                capture_output=True, timeout=10
+            )
+            method = "iptables"
+    except (FileNotFoundError, OSError, Exception) as exc:
+        error = str(exc)
+        method = "unsupported"
+
+    result = {
+        "unblocked": error is None and method != "unsupported",
+        "src_ip": src_ip,
+        "method": method,
+        "rollback_token": rollback_token,
+        "unblocked_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    if error:
+        result["error"] = error
+    return result
+
+
+def _job_kill_session(scope: dict) -> dict:
+    """Terminate an active TCP session from an attacking source.
+
+    scope keys:
+      src_ip    — remote IP of the session to terminate
+      dst_port  — local port (default 80)
+
+    Uses platform-appropriate tools (ss + tc on Linux, netsh on Windows).
+    Degrades gracefully if tools are unavailable.
+    """
+    import datetime as _dt
+    import sys as _sys
+
+    src_ip = scope.get("src_ip", "")
+    dst_port = int(scope.get("dst_port", 80))
+
+    if not src_ip:
+        return {"killed": False, "error": "src_ip required"}
+
+    method = "unsupported"
+    error = None
+    try:
+        if _sys.platform != "win32":
+            import subprocess as _sp
+            result_proc = _sp.run(
+                ["ss", "-K", f"dst {src_ip}", f"dport = {dst_port}"],
+                capture_output=True, timeout=10
+            )
+            method = "ss"
+        else:
+            method = "unsupported"
+    except (FileNotFoundError, OSError, Exception) as exc:
+        error = str(exc)
+        method = "unsupported"
+
+    result = {
+        "killed": error is None and method != "unsupported",
+        "src_ip": src_ip,
+        "dst_port": dst_port,
+        "method": method,
+        "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    if error:
+        result["error"] = error
+    return result
+
+
+def _job_apply_waf_rule(scope: dict) -> dict:
+    """Apply a WAF rule from a structured rule_spec.
+
+    scope keys:
+      rule_id      — stable identifier for this rule
+      rule_spec    — dict: {type, pattern, location, path, ...}
+      rollback_token — opaque token echoed back for remove_waf_rule
+
+    The handler writes a minimal include-snippet to a HydraX-managed WAF
+    directory, if one is configured via HYDRAX_WAF_DIR. Degrades to a no-op
+    with method='unsupported' if the directory is absent or unwritable.
+
+    Safety: rule_spec is data — it is never eval()'d or exec()'d. The snippet
+    written is a static regex/rate-limit directive assembled from the spec's
+    named fields; no shell commands are run.
+    """
+    import datetime as _dt
+    import os as _os
+
+    rule_id = scope.get("rule_id", "")
+    rule_spec = scope.get("rule_spec") or scope  # allow flat scope as rule_spec
+    rollback_token = scope.get("rollback_token", "")
+
+    if not rule_id:
+        return {"applied": False, "error": "rule_id required",
+                "rollback_token": rollback_token}
+
+    waf_dir = _os.environ.get("HYDRAX_WAF_DIR", "")
+    method = "unsupported"
+    error = None
+
+    if waf_dir and _os.path.isdir(waf_dir):
+        try:
+            rule_file = _os.path.join(waf_dir, f"{rule_id}.conf")
+            spec_type = rule_spec.get("type", "")
+            if spec_type == "block_pattern":
+                snippet = (
+                    f"# HydraX auto-rule {rule_id}\n"
+                    f"location ~* \"{rule_spec.get('path', '/')}\" {{\n"
+                    f"  if ($request_uri ~* \"{rule_spec.get('pattern', '')}\") {{\n"
+                    f"    return 403;\n  }}\n}}\n"
+                )
+            elif spec_type == "rate_limit":
+                snippet = (
+                    f"# HydraX rate-limit rule {rule_id}\n"
+                    f"limit_req_zone $binary_remote_addr zone={rule_id}:1m "
+                    f"rate={rule_spec.get('max_req_per_min', 10)}r/m;\n"
+                )
+            else:
+                snippet = f"# HydraX rule {rule_id} (type={spec_type})\n"
+
+            with open(rule_file, "w", encoding="utf-8") as fh:
+                fh.write(snippet)
+            method = "nginx_snippet"
+        except OSError as exc:
+            error = str(exc)
+    else:
+        error = "HYDRAX_WAF_DIR not set or not a directory"
+
+    result = {
+        "applied": error is None,
+        "rule_id": rule_id,
+        "method": method,
+        "rollback_token": rollback_token,
+        "applied_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    if error:
+        result["error"] = error
+    return result
+
+
+def _job_remove_waf_rule(scope: dict) -> dict:
+    """Remove a WAF rule previously applied by apply_waf_rule.
+
+    scope keys:
+      rule_id        — identifier of the rule to remove
+      rollback_token — token echoed back for audit
+    """
+    import datetime as _dt
+    import os as _os
+
+    rule_id = scope.get("rule_id", "")
+    rollback_token = scope.get("rollback_token", "")
+
+    if not rule_id:
+        return {"removed": False, "error": "rule_id required",
+                "rollback_token": rollback_token}
+
+    waf_dir = _os.environ.get("HYDRAX_WAF_DIR", "")
+    method = "unsupported"
+    error = None
+
+    if waf_dir and _os.path.isdir(waf_dir):
+        try:
+            rule_file = _os.path.join(waf_dir, f"{rule_id}.conf")
+            if _os.path.exists(rule_file):
+                _os.remove(rule_file)
+            method = "nginx_snippet"
+        except OSError as exc:
+            error = str(exc)
+    else:
+        error = "HYDRAX_WAF_DIR not set or not a directory"
+
+    result = {
+        "removed": error is None,
+        "rule_id": rule_id,
+        "method": method,
+        "rollback_token": rollback_token,
+        "removed_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    if error:
+        result["error"] = error
+    return result
+
+
 JOB_HANDLERS = {
     "inventory_check": _job_inventory_check,
     "configuration_check": _job_configuration_check,
     "vulnerability_assessment": _job_vulnerability_assessment,
     "telemetry_collection": _job_telemetry_collection,
+    "collect_telemetry": _job_collect_telemetry,
+    "block_source": _job_block_source,
+    "unblock_source": _job_unblock_source,
+    "kill_session": _job_kill_session,
+    "apply_waf_rule": _job_apply_waf_rule,
+    "remove_waf_rule": _job_remove_waf_rule,
 }
 
 

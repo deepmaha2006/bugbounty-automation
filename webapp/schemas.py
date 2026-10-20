@@ -546,3 +546,33 @@ class BrainResolveRequest(BaseModel):
         if self.category:
             self.category = self.category.lower()
         return self
+
+
+_VALID_TIERS = {"observe", "recommend", "auto_contain", "auto_remediate"}
+
+
+class BrainPolicyRequest(BaseModel):
+    asset_id: int
+    org_id: int
+    tier: str
+
+    @field_validator("tier")
+    @classmethod
+    def _valid_tier(cls, v):
+        if v not in _VALID_TIERS:
+            raise ValueError(f"tier must be one of {sorted(_VALID_TIERS)}")
+        return v
+
+
+class BrainHuntRequest(BaseModel):
+    asset_id: int
+    org_id: int
+    max_iterations: int = Field(default=5, ge=1, le=20)
+    max_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    last_event_id: int = Field(default=0, ge=0)
+
+
+class BrainAssetOrgRequest(BaseModel):
+    """Minimal body for rollback-all, expire-actions, etc."""
+    asset_id: int
+    org_id: int

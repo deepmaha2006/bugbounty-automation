@@ -39,8 +39,11 @@ from ui.theme import (
     BORDER_WIDTH_HAIRLINE, BORDER_WIDTH_ACCENT,
 )
 from ui.widgets import (SectionHeader, PrimaryButton, GhostButton,
-                        Tag, MetricCard, StatusIndicator, ThreatFeedWidget,
-                        make_card)
+                        Tag, MetricCard, StatusIndicator, make_card)
+from ui.agent_status_card import AgentStatusCard
+from ui.radar_ring import RadarRing
+from ui.xp_bar import XPBar
+from ui.animated_threat_feed import AnimatedThreatFeed
 from ui.dialogs.scope_editor import ScopeEditorDialog
 from ui.dialogs.scan_config_dialog import ScanConfigDialog, short_scanner_label
 from core.scan_engine import ScanEngine
@@ -59,11 +62,7 @@ class ProfessionalScannerView(ctk.CTkFrame):
         self.current_target = ""
         self.scan_thread = None
 
-        # Live activity feed — populated only from real events on this scan
-        # engine (see _add_threat_feed_item); starts empty, not fabricated.
-        self.threat_feed = [
-            {"time": "--:--", "threat": "No activity yet — start a scan to populate this feed.", "severity": "Info"},
-        ]
+        self._agents_done = 0   # tracks done/error/skipped for radar progress
 
         self._setup_ui()
         self._start_event_listener()
@@ -284,6 +283,7 @@ class ProfessionalScannerView(ctk.CTkFrame):
         main_container.grid_rowconfigure(0, weight=0)
         main_container.grid_rowconfigure(1, weight=1)
         main_container.grid_rowconfigure(2, weight=0)
+        main_container.grid_rowconfigure(3, weight=0)
 
         # Compact summary of which scanners are currently enabled.
         summary_frame = make_card(main_container)
@@ -313,9 +313,20 @@ class ProfessionalScannerView(ctk.CTkFrame):
         # long-running scan isn't a black box.
         self._create_scanner_activity_panel(main_container)
 
+        # HUD strip — RadarRing (progress ring) + XPBar (findings XP)
+        hud_strip = ctk.CTkFrame(main_container, fg_color="transparent")
+        hud_strip.grid(row=2, column=0, sticky="ew", pady=(0, SPACE_4))
+        hud_strip.grid_columnconfigure(1, weight=1)
+
+        self._radar = RadarRing(hud_strip, size=96, bg="#0b0b0b")
+        self._radar.grid(row=0, column=0, padx=(0, SPACE_4), pady=SPACE_2)
+
+        self._xp_bar = XPBar(hud_strip)
+        self._xp_bar.grid(row=0, column=1, sticky="ew", pady=SPACE_2)
+
         # Action buttons at bottom
         action_frame = ctk.CTkFrame(main_container, fg_color="transparent", height=60)
-        action_frame.grid(row=2, column=0, sticky="sew", pady=(SPACE_4, 0))
+        action_frame.grid(row=3, column=0, sticky="sew", pady=(SPACE_4, 0))
         action_frame.grid_propagate(False)
 
         self.export_button = PrimaryButton(
@@ -378,84 +389,22 @@ class ProfessionalScannerView(ctk.CTkFrame):
         ).grid(row=0, column=0, pady=SPACE_4)
 
     def _init_scanner_activity(self, roster: List[tuple]):
-        """Rebuild the activity panel with one QUEUED row per scanner about
-        to run — called from the 'scanners_queued' engine event."""
+        """Rebuild the activity panel with one animated card per scanner."""
         for widget in self.scanner_activity_scroll.winfo_children():
             widget.destroy()
         self.scanner_rows = {}
         for i, (key, name) in enumerate(roster):
-            row = self._build_scanner_row(key, name)
-            row["frame"].grid(row=i, column=0, sticky="ew", pady=(0, SPACE_2))
-            self.scanner_rows[key] = row
-
-    def _build_scanner_row(self, key: str, name: str) -> dict:
-        frame = ctk.CTkFrame(
-            self.scanner_activity_scroll,
-            fg_color=SURFACE_MUTED,
-            corner_radius=RADIUS_MD,
-            border_width=BORDER_WIDTH_HAIRLINE,
-            border_color=BORDER_HAIRLINE,
-        )
-        frame.grid_columnconfigure(0, weight=1)
-
-        name_label = ctk.CTkLabel(
-            frame, text=name, font=ctk.CTkFont(*FONTS["small_bold"]),
-            text_color=TEXT_PRIMARY, anchor="w",
-        )
-        name_label.grid(row=0, column=0, sticky="w", padx=(SPACE_3, SPACE_2), pady=SPACE_2)
-
-        status_label = ctk.CTkLabel(
-            frame, text="QUEUED", font=ctk.CTkFont(*FONTS["small_bold"]),
-            text_color=TEXT_SECONDARY, width=80, anchor="w",
-        )
-        status_label.grid(row=0, column=1, padx=SPACE_2, pady=SPACE_2)
-
-        time_label = ctk.CTkLabel(
-            frame, text="--", font=ctk.CTkFont(*FONTS["small"]),
-            text_color=TEXT_SECONDARY, width=60, anchor="e",
-        )
-        time_label.grid(row=0, column=2, padx=SPACE_2, pady=SPACE_2)
-
-        findings_label = ctk.CTkLabel(
-            frame, text="-- findings", font=ctk.CTkFont(*FONTS["small"]),
-            text_color=TEXT_SECONDARY, width=90, anchor="e",
-        )
-        findings_label.grid(row=0, column=3, padx=(SPACE_2, SPACE_3), pady=SPACE_2)
-
-        return {
-            "frame": frame, "status_label": status_label,
-            "time_label": time_label, "findings_label": findings_label,
-            "status": "queued", "start": None,
-        }
+            card = AgentStatusCard(self.scanner_activity_scroll, key=key, name=name)
+            card.grid(row=i, column=0, sticky="ew", pady=(0, SPACE_2))
+            self.scanner_rows[key] = card
 
     def _set_scanner_status(self, key: str, status: str,
-                            findings: Optional[int] = None, duration: Optional[float] = None):
-        row = self.scanner_rows.get(key)
-        if not row:
+                            findings: Optional[int] = None,
+                            duration: Optional[float] = None):
+        card = self.scanner_rows.get(key)
+        if card is None:
             return
-        row["status"] = status
-        color_map = {
-            "queued": TEXT_SECONDARY, "running": TEXT_TERTIARY,
-            "done": STATUS_OK, "error": STATUS_CRITICAL,
-        }
-        row["status_label"].configure(text=status.upper(), text_color=color_map.get(status, TEXT_SECONDARY))
-        if status == "running":
-            row["start"] = time.time()
-            row["time_label"].configure(text="0.0s")
-        elif duration is not None:
-            row["time_label"].configure(text=f"{duration:.1f}s")
-        if findings is not None:
-            row["findings_label"].configure(text=f"{findings} finding{'s' if findings != 1 else ''}")
-
-    def _tick_scanner_rows(self):
-        """Advance the elapsed-time label of every still-RUNNING row every
-        second while a scan is in progress."""
-        if not self.is_scanning:
-            return
-        for row in self.scanner_rows.values():
-            if row["status"] == "running" and row["start"] is not None:
-                row["time_label"].configure(text=f"{time.time() - row['start']:.1f}s")
-        self.after(1000, self._tick_scanner_rows)
+        card.update_status(status, findings=findings, duration=duration)
 
     def _create_threat_feed(self):
         """Create real-time threat intelligence feed — Hashcats card."""
@@ -473,8 +422,8 @@ class ProfessionalScannerView(ctk.CTkFrame):
         )
         threat_label.grid(row=0, column=0, padx=CARD_PADDING, pady=(CARD_PADDING, SPACE_3), sticky="w")
 
-        # Threat feed widget
-        self.threat_widget = ThreatFeedWidget(threat_frame, threats=self.threat_feed)
+        # Animated per-finding threat feed
+        self.threat_widget = AnimatedThreatFeed(threat_frame, height=160)
         self.threat_widget.grid(row=1, column=0, padx=CARD_PADDING, pady=(0, CARD_PADDING), sticky="ew")
 
     def _load_enabled_scanners_from_profile(self, profile_name: str) -> List[str]:
@@ -558,9 +507,13 @@ class ProfessionalScannerView(ctk.CTkFrame):
         self.clear_button.configure(state="disabled")
         self.status_indicator.update_status("SCANNING...", "active")
 
-        # Reset metrics
+        # Reset metrics and HUD
         self._reset_metrics()
         self._render_scanner_activity_empty()
+        self._agents_done = 0
+        self._radar.reset()
+        self._xp_bar.reset()
+        self.threat_widget.clear()
 
         # Start scan in background thread
         self.scan_start_time = datetime.now()
@@ -570,7 +523,6 @@ class ProfessionalScannerView(ctk.CTkFrame):
             daemon=True
         )
         self.scan_thread.start()
-        self.after(1000, self._tick_scanner_rows)
 
         # Update threat feed with scan start
         self._add_threat_feed_item(f"Started security assessment on {target}")
@@ -583,6 +535,7 @@ class ProfessionalScannerView(ctk.CTkFrame):
             self.scan_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
             self.status_indicator.update_status("SCAN STOPPED", "warning")
+            self._radar.stop_sweep()
             self._add_threat_feed_item("Security assessment stopped by user")
 
     def _run_scan_worker(self, target: str, profile_name: str):
@@ -611,6 +564,7 @@ class ProfessionalScannerView(ctk.CTkFrame):
         self.export_button.configure(state="normal")
         self.clear_button.configure(state="normal")
 
+        self._radar.stop_sweep()
         scan_duration = datetime.now() - self.scan_start_time
         duration_text = f"{scan_duration.seconds//60}m {scan_duration.seconds%60}s"
         if total_findings is not None:
@@ -629,19 +583,11 @@ class ProfessionalScannerView(ctk.CTkFrame):
         self._show_error(f"Scan failed: {error_msg}")
         self._add_threat_feed_item(f"Scan error: {error_msg}")
 
-    def _add_threat_feed_item(self, threat_text: str):
-        """Add item to threat intelligence feed."""
-        from datetime import datetime
-        new_threat = {
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "threat": threat_text,
-            "severity": "Info"
-        }
-        self.threat_feed.insert(0, new_threat)
-        # Keep only last 10 items
-        if len(self.threat_feed) > 10:
-            self.threat_feed = self.threat_feed[:10]
-        self.threat_widget.update_threats(self.threat_feed)
+    def _add_threat_feed_item(self, threat_text: str,
+                              severity: str = "info") -> None:
+        """Add a lifecycle message to the animated threat feed."""
+        self.threat_widget.add_finding(key="sys", title=threat_text,
+                                       severity=severity)
 
     def _reset_metrics(self):
         """Reset vulnerability metrics to zero."""
@@ -711,7 +657,10 @@ class ProfessionalScannerView(ctk.CTkFrame):
         elif event_type == "error":
             self._scan_error(event[1] if len(event) > 1 else "Unknown error")
         elif event_type == "scanners_queued":
-            self._init_scanner_activity(event[1])
+            roster = event[1]
+            self._init_scanner_activity(roster)
+            self._radar.update_progress(0, len(roster))
+            self._radar.start_sweep()
         elif event_type == "scanner_start":
             _, key, name = event
             self._set_scanner_status(key, "running")
@@ -741,9 +690,42 @@ class ProfessionalScannerView(ctk.CTkFrame):
                 findings.extend(result.get("vulnerabilities") or [])
             self._update_metrics(findings)
             self._scan_complete(len(findings))
+        elif event_type == "agent_lifecycle":
+            self._handle_lifecycle_event(event)
         elif event_type == "report_saved":
             pass
         elif event_type == "discovery":
             pass
         elif event_type == "progress":
             pass
+
+    def _handle_lifecycle_event(self, event):
+        """Route agent_lifecycle events to the matching AgentStatusCard."""
+        # ("agent_lifecycle", key, phase, *extra)
+        if len(event) < 3:
+            return
+        key, phase = event[1], event[2]
+        card = self.scanner_rows.get(key)
+        if card is None or not isinstance(card, AgentStatusCard):
+            return
+        if phase == "skipped":
+            card.update_status("skipped")
+            self._agents_done += 1
+            self._radar.update_progress(self._agents_done,
+                                        max(1, len(self.scanner_rows)))
+        elif phase in ("done", "error"):
+            self._agents_done += 1
+            self._radar.update_progress(self._agents_done,
+                                        max(1, len(self.scanner_rows)))
+        elif phase == "finding" and len(event) > 3:
+            finding = event[3]
+            if not hasattr(self, '_live_finding_counts'):
+                self._live_finding_counts = {}
+            self._live_finding_counts[key] = self._live_finding_counts.get(key, 0) + 1
+            card.update_findings(self._live_finding_counts[key])
+            # Animate feed + award XP
+            title = finding.get("title", finding.get("type", "Finding"))
+            severity = finding.get("severity", "info").lower()
+            self.threat_widget.add_finding(key=key, title=title,
+                                           severity=severity)
+            self._xp_bar.add_xp(XPBar.xp_for_severity(severity))
