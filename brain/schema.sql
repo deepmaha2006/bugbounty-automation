@@ -70,3 +70,24 @@ CREATE TABLE IF NOT EXISTS brain_knowledge (
 
 CREATE INDEX IF NOT EXISTS idx_brain_knowledge_asset ON brain_knowledge(asset_id, org_id);
 CREATE INDEX IF NOT EXISTS idx_brain_knowledge_fp    ON brain_knowledge(signature_fingerprint);
+
+-- CVE Database for autonomous vulnerability detection and remediation
+CREATE TABLE IF NOT EXISTS brain_cve_db (
+    cve_id              TEXT PRIMARY KEY,
+    severity            TEXT NOT NULL,
+    description         TEXT NOT NULL,
+    attack_vector       TEXT[] DEFAULT '{}',
+    cwe_ids             TEXT[] DEFAULT '{}',
+    attack_class        TEXT,
+    fix_recommendation  JSONB NOT NULL DEFAULT '{}',
+    confidence          NUMERIC(5,4) DEFAULT 0.99,
+    source              TEXT DEFAULT 'nvd',
+    imported_at         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    published_date      TIMESTAMP WITH TIME ZONE,
+    cvss_vector         TEXT,
+    cvss_score          NUMERIC(4,1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_brain_cve_severity ON brain_cve_db(severity);
+CREATE INDEX IF NOT EXISTS idx_brain_cve_attack_class ON brain_cve_db(attack_class);
+CREATE INDEX IF NOT EXISTS idx_brain_cve_cwe ON brain_cve_db USING GIN(cwe_ids);

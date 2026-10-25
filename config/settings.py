@@ -4,6 +4,7 @@ Single source of truth for app metadata, paths, theme and the scanner catalog.
 """
 
 from pathlib import Path
+import os
 
 # ---------------------------------------------------------------------------
 # Application metadata
@@ -30,7 +31,7 @@ DEFAULT_REQUEST_DELAY = 0.05    # seconds between requests (politeness
                                  # utils/sync_rate_limiter.py, not this)
 DEFAULT_THREADS = 8             # parallel scanner workers — actually wired
                                  # to Settings now via ScanEngine.apply_settings
-VERIFY_SSL = False
+VERIFY_SSL = os.environ.get("HYDRAX_VERIFY_SSL", "1").lower() not in ("0", "false", "no")
 FOLLOW_REDIRECTS = True
 MAX_FINDINGS_PER_SCANNER = 50   # cap evidence bloat per scanner
 
@@ -100,6 +101,8 @@ from scanners.core import (           # noqa: E402
     ClickjackTester, PrototypePollutionScanner, XMLScanner,
     WebSocketScanner, LLMScanner,
     NucleiScanner, NmapScanner, SqlmapScanner,
+    GobusterScanner, FFufScanner, NiktoScanner,
+    MasscanScanner, SubfinderScanner, WhatWebScanner,
 )
 
 SCANNER_CATEGORIES = [
@@ -162,18 +165,6 @@ SCANNER_CATEGORIES = [
         ],
     },
     {
-        "name": "Kali Power Tools",
-        "icon": "⚡",
-        "scanners": [
-            {"key": "nuclei", "name": "Nuclei",
-             "desc": "Template-based CVE and misconfiguration scanner (requires nuclei)", "cls": NucleiScanner, "default": False},
-            {"key": "nmap", "name": "Nmap Port Scan",
-             "desc": "Port and service discovery with version detection (requires nmap)", "cls": NmapScanner, "default": False},
-            {"key": "sqlmap", "name": "sqlmap",
-             "desc": "Advanced SQL injection detection and exploitation (requires sqlmap)", "cls": SqlmapScanner, "default": False},
-        ],
-    },
-    {
         "name": "Advanced & Modern Threats",
         "icon": "🔬",
         "scanners": [
@@ -195,6 +186,40 @@ SCANNER_CATEGORIES = [
              "desc": "CL.TE and TE.CL desync detection", "cls": RequestSmuggler, "default": False},
         ],
     },
+    {
+        "name": "HexStrike AI",
+        "icon": "🤖",
+        "scanners": [
+            {"key": "nmap", "name": "Nmap Port Scan",
+             "desc": "Port and service discovery with version detection (requires nmap)", "cls": NmapScanner, "default": False},
+            {"key": "nuclei", "name": "Nuclei",
+             "desc": "Template-based CVE and misconfiguration scanner (requires nuclei)", "cls": NucleiScanner, "default": False},
+            {"key": "sqlmap", "name": "sqlmap",
+             "desc": "Advanced SQL injection detection and exploitation (requires sqlmap)", "cls": SqlmapScanner, "default": False},
+            {"key": "gobuster", "name": "Gobuster Directory Scanner",
+             "desc": "Directory and file brute-forcing (requires gobuster)", "cls": GobusterScanner, "default": False},
+            {"key": "ffuf", "name": "FFuf Fuzzer",
+             "desc": "Fast web fuzzing for directories and parameters (requires ffuf)", "cls": FFufScanner, "default": False},
+            {"key": "nikto", "name": "Nikto Web Scanner",
+             "desc": "Web server misconfiguration scanner (requires nikto)", "cls": NiktoScanner, "default": False},
+            {"key": "masscan", "name": "Masscan Port Scanner",
+             "desc": "Ultra-fast port scanner for large networks (requires masscan, root)", "cls": MasscanScanner, "default": False},
+            {"key": "subfinder", "name": "Subdomain Enumerator",
+             "desc": "Passive subdomain enumeration (requires subfinder)", "cls": SubfinderScanner, "default": False},
+            {"key": "whatweb", "name": "WhatWeb Fingerprinter",
+             "desc": "Technology fingerprinting and detection (requires whatweb)", "cls": WhatWebScanner, "default": False},
+        ],
+    },
+    {
+        "name": "Shannon AI Pentester",
+        "icon": "🧠",
+        "scanners": [
+            {"key": "shannon", "name": "Shannon AI Pentester",
+             "desc": "Native 5-phase AI pentest pipeline: recon, vuln scan, correlation, report — fully local, no Docker/API key", "cls": None, "default": False},
+            {"key": "shannon_status", "name": "Shannon Status Check",
+             "desc": "List completed Shannon workspace reports", "cls": None, "default": False},
+        ],
+    },
 ]
 
 # Flat lookup: scanner key -> catalog entry (with category attached)
@@ -209,6 +234,19 @@ for _category in SCANNER_CATEGORIES:
 
 ALL_SCANNER_KEYS = list(SCANNER_MAP.keys())
 DEFAULT_SCANNER_KEYS = [k for k, v in SCANNER_META.items() if v.get("default")]
+
+
+# ---------------------------------------------------------------------------
+# Local AI brain settings (no external API required)
+# ---------------------------------------------------------------------------
+LOCAL_LLM_PROVIDER = os.environ.get("PENTEST_LLM_PROVIDER", "local")
+LOCAL_LLM_BASE_URL  = os.environ.get("PENTEST_LLM_BASE_URL", "http://localhost:11434/v1")
+LOCAL_LLM_MODEL     = os.environ.get("PENTEST_LLM_MODEL", "llama3.2")
+
+BRAIN_STATE_FILE    = PROJECT_ROOT / "memory" / "vuln_brain.json"
+BRAIN_MAX_HISTORY   = 200           # scans kept in brain state
+BRAIN_AUTO_ENRICH   = True          # enrich every finding with CVE + OWASP tags
+BRAIN_AI_TRIAGE     = True          # run LLM triage summary after each scan
 
 
 def resolve_target_url(raw: str) -> str:

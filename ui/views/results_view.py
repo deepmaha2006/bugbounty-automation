@@ -13,7 +13,7 @@ from ui.theme import (
     # Text
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY, TEXT_INVERSE,
     # Status / Severity
-    STATUS_COLORS, SEVERITY_COLORS,
+    STATUS_COLORS, SEVERITY_COLORS, SEV_ROW,
     STATUS_CRITICAL, STATUS_HIGH, STATUS_MEDIUM, STATUS_LOW, STATUS_OK,
     # Typography
     FONTS,
@@ -37,16 +37,17 @@ class FindingRow(ctk.CTkFrame):
     """One finding: severity badge, type, description, evidence, fix — Hashcats style."""
 
     def __init__(self, master, finding: dict):
+        sev = finding.get("severity", "Info")
+        row_bg = SEV_ROW.get(sev, SURFACE_MUTED)
         super().__init__(
             master,
-            fg_color=SURFACE_MUTED,
+            fg_color=row_bg,
             corner_radius=RADIUS_MD,
             border_width=BORDER_WIDTH_HAIRLINE,
             border_color=BORDER_HAIRLINE
         )
         self.grid_columnconfigure(1, weight=1)
 
-        sev = finding.get("severity", "Info")
         color = SEVERITY_COLORS.get(sev, SEVERITY_COLORS["Info"])
 
         badge = SeverityBadge(self, sev)

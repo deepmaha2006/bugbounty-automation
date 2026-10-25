@@ -329,13 +329,37 @@ class ProfessionalDashboardView(ctk.CTkFrame):
             n_reports = None
 
         score = report.get("security_score") if report else None
+
+        # Pull cumulative totals from SQLite DB (all scans, deduplicated)
+        db_total: Optional[int] = None
+        db_sev: Dict[str, int] = {}
+        try:
+            from core.findings_db import get_db
+            _db = get_db()
+            db_total = _db.total_findings()
+            db_sev = _db.severity_summary()
+        except Exception:
+            pass
+
+        # KPI strip: "FINDINGS" shows DB total (all-time unique), fallback to
+        # last-scan total when the DB is empty or unavailable.
+        findings_display = db_total if db_total else total
+        findings_frac = self._share(
+            db_sev or counts, ("Critical", "High"), findings_display
+        ) if findings_display else 0
+
         self._set_kpi("reports", n_reports, 1.0 if n_reports else 0)
         self._set_running()
-        self._set_kpi("findings", total, self._share(counts, ("Critical", "High"), total))
+        self._set_kpi("findings", findings_display, findings_frac)
         self._set_kpi("score", f"{int(score)}%" if isinstance(score, (int, float)) else None,
                       (float(score) / 100) if isinstance(score, (int, float)) else 0)
+
+        # Per-severity: prefer DB cumulative, fall back to last-scan counts
+        combined = db_sev if db_sev else (counts or {})
+        combined_total = sum(combined.values()) or 1
         for sev in ("Critical", "High", "Medium", "Low"):
-            self._set_kpi(sev, counts[sev] if counts else None, self._share(counts, (sev,), total))
+            n = combined.get(sev, 0)
+            self._set_kpi(sev, n if combined else None, n / combined_total if combined else 0)
 
         self._sev_counts = counts or {k: 0 for k in SEV_ORDER}
         self._draw_sev_bar()

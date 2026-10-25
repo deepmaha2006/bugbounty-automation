@@ -193,8 +193,9 @@ class ToolReadinessPanel(ctk.CTkFrame):
         total = len(reports)
         needs_count = total - ready_count
         color = _STATUS_READY if needs_count == 0 else _STATUS_NEEDS
+        # Spec §6: always show count relative to 42 total agents
         self._summary_lbl.configure(
-            text=f"{ready_count}/{total} agents ready"
+            text=f"{ready_count}/42 agents ready"
             + (f"  ·  {needs_count} agent(s) need tools" if needs_count else ""),
             text_color=color,
         )

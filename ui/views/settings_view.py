@@ -5,6 +5,7 @@ plus an About panel — HydraX Hashcats Design System.
 
 import json
 from pathlib import Path
+from typing import Dict
 
 import customtkinter as ctk
 
@@ -37,6 +38,7 @@ from ui.theme import (
 )
 from ui.widgets import (SectionHeader, PrimaryButton, GhostButton, make_card)
 from ui.tool_readiness_panel import ToolReadinessPanel
+from ui.signature_widget import SignatureWidget
 
 
 SETTINGS_FILE = PROJECT_ROOT / "config" / "settings.json"
@@ -217,9 +219,12 @@ class SettingsView(ctk.CTkFrame):
         self._tool_panel = ToolReadinessPanel(body)
         self._tool_panel.grid(row=1, column=0, sticky="ew", padx=0, pady=(SPACE_4, 0))
 
+        # Notifications card
+        self._build_notifications_card(body, row=2)
+
         # About card
         info = make_card(body)
-        info.grid(row=2, column=0, sticky="ew", padx=0, pady=(SPACE_4, 0))
+        info.grid(row=3, column=0, sticky="ew", padx=0, pady=(SPACE_4, 0))
         info.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
@@ -253,6 +258,184 @@ class SettingsView(ctk.CTkFrame):
             anchor="w"
         ).grid(row=2, column=0, sticky="w", padx=CARD_PADDING, pady=(0, CARD_PADDING))
 
+        # ── Signature card — immutable authorship seal ─────────────────────
+        sig_card = make_card(body)
+        sig_card.grid(row=4, column=0, sticky="ew", padx=0, pady=(SPACE_4, SPACE_6))
+        sig_card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            sig_card,
+            text="CREATOR",
+            font=ctk.CTkFont(*FONTS["small_bold"]),
+            text_color=TEXT_SECONDARY,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=CARD_PADDING, pady=(CARD_PADDING, SPACE_2))
+
+        ctk.CTkLabel(
+            sig_card,
+            text=(
+                "HydraX is designed, architected, and developed by its creator.\n"
+                "This signature is an immutable platform seal — it cannot be altered\n"
+                "or removed from any deployed instance of this software."
+            ),
+            font=ctk.CTkFont(*FONTS["small"]),
+            text_color=TEXT_SECONDARY,
+            anchor="w",
+            justify="left",
+            wraplength=580,
+        ).grid(row=1, column=0, sticky="w", padx=CARD_PADDING, pady=(0, SPACE_3))
+
+        self._signature = SignatureWidget(sig_card)
+        self._signature.grid(
+            row=2, column=0, sticky="ew",
+            padx=CARD_PADDING, pady=(0, CARD_PADDING)
+        )
+
+        # Replay button — triggers the animation again without modifying anything
+        ctk.CTkButton(
+            sig_card,
+            text="↺  Replay Signature",
+            font=ctk.CTkFont(*FONTS["small"]),
+            text_color=TEXT_SECONDARY,
+            fg_color="transparent",
+            hover_color=SURFACE_STRONG,
+            corner_radius=RADIUS_SM,
+            height=24,
+            anchor="w",
+            command=self._signature.replay,
+        ).grid(row=3, column=0, sticky="w", padx=CARD_PADDING, pady=(0, CARD_PADDING))
+
+    def _build_notifications_card(self, parent, row: int) -> None:
+        from utils.notifications import _load_config as _load_notif, save_config as _save_notif
+        cfg = _load_notif()
+
+        card = make_card(parent)
+        card.grid(row=row, column=0, sticky="ew", padx=0, pady=(SPACE_4, 0))
+        card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            card, text="🔔  NOTIFICATIONS",
+            font=ctk.CTkFont(*FONTS["subheading"]),
+            text_color=TEXT_PRIMARY, anchor="w",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=CARD_PADDING, pady=(CARD_PADDING, SPACE_3))
+
+        ctk.CTkLabel(
+            card, text="Desktop notifications, email alerts, and webhook messages when vulnerabilities are found.",
+            font=ctk.CTkFont(*FONTS["small"]), text_color=TEXT_SECONDARY, anchor="w",
+            wraplength=600, justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=CARD_PADDING, pady=(0, SPACE_3))
+
+        # Enable toggle
+        self._notif_enabled = ctk.BooleanVar(value=cfg.get("enabled", True))
+        ctk.CTkLabel(card, text="Enable notifications", font=ctk.CTkFont(*FONTS["body"]),
+                     text_color=TEXT_PRIMARY, anchor="w").grid(
+            row=2, column=0, sticky="w", padx=CARD_PADDING, pady=SPACE_2)
+        ctk.CTkSwitch(card, text="", variable=self._notif_enabled,
+                      button_color=SURFACE_RAISED, progress_color=STATUS_OK,
+                      fg_color=SURFACE_STRONG).grid(
+            row=2, column=1, sticky="w", padx=(0, CARD_PADDING), pady=SPACE_2)
+
+        # Alert threshold
+        ctk.CTkLabel(card, text="Alert threshold", font=ctk.CTkFont(*FONTS["body"]),
+                     text_color=TEXT_PRIMARY, anchor="w").grid(
+            row=3, column=0, sticky="w", padx=CARD_PADDING, pady=SPACE_2)
+        self._notif_threshold = ctk.StringVar(value=cfg.get("threshold", "high"))
+        ctk.CTkOptionMenu(card, values=["critical", "high", "medium", "all"],
+                          variable=self._notif_threshold,
+                          height=INPUT_HEIGHT, width=120,
+                          fg_color=SURFACE_MUTED, button_color=SURFACE_RAISED,
+                          text_color=TEXT_PRIMARY, font=ctk.CTkFont(*FONTS["small"])).grid(
+            row=3, column=1, sticky="w", padx=(0, CARD_PADDING), pady=SPACE_2)
+
+        # Quiet hours
+        ctk.CTkLabel(card, text="Quiet hours (start / end)", font=ctk.CTkFont(*FONTS["body"]),
+                     text_color=TEXT_PRIMARY, anchor="w").grid(
+            row=4, column=0, sticky="w", padx=CARD_PADDING, pady=SPACE_2)
+        qrow = ctk.CTkFrame(card, fg_color="transparent")
+        qrow.grid(row=4, column=1, sticky="w", padx=(0, CARD_PADDING), pady=SPACE_2)
+        self._notif_qstart = ctk.CTkEntry(qrow, placeholder_text="22:00", width=70, height=INPUT_HEIGHT)
+        self._notif_qstart.insert(0, cfg.get("quiet_hours_start", ""))
+        self._notif_qstart.pack(side="left", padx=(0, SPACE_2))
+        self._notif_qend = ctk.CTkEntry(qrow, placeholder_text="08:00", width=70, height=INPUT_HEIGHT)
+        self._notif_qend.insert(0, cfg.get("quiet_hours_end", ""))
+        self._notif_qend.pack(side="left")
+
+        # Email section
+        ctk.CTkFrame(card, height=1, fg_color=BORDER_HAIRLINE, corner_radius=0).grid(
+            row=5, column=0, columnspan=2, sticky="ew", padx=CARD_PADDING, pady=SPACE_3)
+        ctk.CTkLabel(card, text="EMAIL ALERTS", font=ctk.CTkFont(*FONTS["small_bold"]),
+                     text_color=TEXT_TERTIARY, anchor="w").grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=CARD_PADDING, pady=(0, SPACE_2))
+
+        self._notif_email_enabled = ctk.BooleanVar(value=cfg.get("email_enabled", False))
+        ctk.CTkCheckBox(card, text="Send email on alert", variable=self._notif_email_enabled,
+                        font=ctk.CTkFont(*FONTS["small"])).grid(
+            row=7, column=0, columnspan=2, sticky="w", padx=CARD_PADDING, pady=SPACE_1)
+
+        email_fields = [
+            ("SMTP Host",  "smtp_host",     cfg.get("smtp_host", ""),     "mail.example.com"),
+            ("SMTP Port",  "smtp_port",     str(cfg.get("smtp_port", 587)), "587"),
+            ("SMTP User",  "smtp_user",     cfg.get("smtp_user", ""),     "user@example.com"),
+            ("SMTP Pass",  "smtp_password", "",                            "••••••••"),
+            ("Send to",    "email_to",      cfg.get("email_to", ""),      "security@example.com"),
+        ]
+        self._notif_email_vars: Dict[str, ctk.CTkEntry] = {}
+        for j, (lbl, key, val, ph) in enumerate(email_fields):
+            ctk.CTkLabel(card, text=lbl, font=ctk.CTkFont(*FONTS["small"]),
+                         text_color=TEXT_SECONDARY, anchor="w").grid(
+                row=8 + j, column=0, sticky="w", padx=(CARD_PADDING * 2, 0), pady=SPACE_1)
+            show = "*" if key == "smtp_password" else ""
+            e = ctk.CTkEntry(card, placeholder_text=ph, height=INPUT_HEIGHT, show=show)
+            if val:
+                e.insert(0, val)
+            e.grid(row=8 + j, column=1, sticky="ew", padx=(0, CARD_PADDING), pady=SPACE_1)
+            self._notif_email_vars[key] = e
+
+        # Webhook section
+        ctk.CTkFrame(card, height=1, fg_color=BORDER_HAIRLINE, corner_radius=0).grid(
+            row=13, column=0, columnspan=2, sticky="ew", padx=CARD_PADDING, pady=SPACE_3)
+        ctk.CTkLabel(card, text="WEBHOOK (Slack / Telegram / generic POST)", font=ctk.CTkFont(*FONTS["small_bold"]),
+                     text_color=TEXT_TERTIARY, anchor="w").grid(
+            row=14, column=0, columnspan=2, sticky="w", padx=CARD_PADDING, pady=(0, SPACE_2))
+        self._notif_webhook_enabled = ctk.BooleanVar(value=cfg.get("webhook_enabled", False))
+        ctk.CTkCheckBox(card, text="Send webhook on alert", variable=self._notif_webhook_enabled,
+                        font=ctk.CTkFont(*FONTS["small"])).grid(
+            row=15, column=0, columnspan=2, sticky="w", padx=CARD_PADDING, pady=SPACE_1)
+        ctk.CTkLabel(card, text="Webhook URL", font=ctk.CTkFont(*FONTS["small"]),
+                     text_color=TEXT_SECONDARY, anchor="w").grid(
+            row=16, column=0, sticky="w", padx=(CARD_PADDING * 2, 0), pady=SPACE_1)
+        self._notif_webhook_url = ctk.CTkEntry(card, placeholder_text="https://hooks.slack.com/…",
+                                               height=INPUT_HEIGHT)
+        if cfg.get("webhook_url"):
+            self._notif_webhook_url.insert(0, cfg["webhook_url"])
+        self._notif_webhook_url.grid(row=16, column=1, sticky="ew",
+                                     padx=(0, CARD_PADDING), pady=SPACE_1)
+
+        # Save
+        GhostButton(card, "SAVE NOTIFICATIONS", command=self._save_notifications,
+                    height=BTN_HEIGHT_MD).grid(
+            row=17, column=0, columnspan=2, sticky="w",
+            padx=CARD_PADDING, pady=(SPACE_3, CARD_PADDING))
+
+    def _save_notifications(self) -> None:
+        from utils.notifications import save_config as _save_notif
+        cfg = {
+            "enabled":           bool(self._notif_enabled.get()),
+            "threshold":         self._notif_threshold.get(),
+            "quiet_hours_start": self._notif_qstart.get().strip(),
+            "quiet_hours_end":   self._notif_qend.get().strip(),
+            "email_enabled":     bool(self._notif_email_enabled.get()),
+            "smtp_host":         self._notif_email_vars["smtp_host"].get().strip(),
+            "smtp_port":         int(self._notif_email_vars["smtp_port"].get().strip() or "587"),
+            "smtp_user":         self._notif_email_vars["smtp_user"].get().strip(),
+            "smtp_password":     self._notif_email_vars["smtp_password"].get(),
+            "email_to":          self._notif_email_vars["email_to"].get().strip(),
+            "webhook_enabled":   bool(self._notif_webhook_enabled.get()),
+            "webhook_url":       self._notif_webhook_url.get().strip(),
+        }
+        _save_notif(cfg)
+        self.app.show_message("Notifications saved", "Notification settings updated.")
+
     def _save(self):
         try:
             self.settings.update({
@@ -274,3 +457,6 @@ class SettingsView(ctk.CTkFrame):
     def refresh(self):
         # Kick off tool-readiness preflight whenever the Settings page is opened.
         self._tool_panel.run_preflight()
+        # Replay the signature animation each time Settings is visited
+        if hasattr(self, "_signature"):
+            self._signature.replay()

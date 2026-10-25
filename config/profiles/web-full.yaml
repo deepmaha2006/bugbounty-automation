@@ -24,9 +24,6 @@ enabled_scanners:
 - cloud
 - ddos
 - recon
-- nuclei
-- nmap
-- sqlmap
 - api
 - proto_pollution
 - xml
@@ -35,6 +32,17 @@ enabled_scanners:
 - mobile
 - cache
 - smuggling
+- nmap
+- nuclei
+- sqlmap
+- gobuster
+- ffuf
+- nikto
+- masscan
+- subfinder
+- whatweb
+- shannon
+- shannon_status
 disabled_scanners: []
 max_pages: 0
 max_depth: 0

@@ -16,6 +16,7 @@ from typing import Dict, Any, List
 from config.settings import REPORTS_DIR
 from utils.reporter import ReportGenerator, normalize_report_data
 from utils.sarif_export import save_sarif
+from core.findings_db import get_db
 
 
 class ReportStore:
@@ -30,6 +31,20 @@ class ReportStore:
     def timestamp_stamp(self) -> str:
         return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    def _persist_findings_to_db(self, report_data: Dict[str, Any]) -> None:
+        """Write findings from a report into the central SQLite store."""
+        try:
+            db = get_db()
+            target = str(report_data.get("target", "unknown"))
+            all_findings = list(report_data.get("findings", []))
+            for r in report_data.get("results", {}).values():
+                vulns = r.get("vulnerabilities", []) if isinstance(r, dict) else []
+                all_findings.extend(vulns)
+            if all_findings:
+                db.insert_findings(target, all_findings)
+        except Exception:
+            pass  # never let DB errors break report saving
+
     def save(self, report_data: Dict[str, Any], fmt: str = "html") -> Path:
         """Persist a report and return the file path.
 
@@ -38,6 +53,7 @@ class ReportStore:
         kept), so every format shows the same counts as the Results screen.
         """
         report_data = normalize_report_data(report_data)
+        self._persist_findings_to_db(report_data)
         stamp = self.timestamp_stamp()
         target = str(report_data.get("target", "unknown")).replace("https://", "").replace("http://", "")
         safe_target = "".join(c for c in target if c.isalnum() or c in ".-_")[:40] or "target"

@@ -32,28 +32,25 @@ from ui.theme import (
 )
 from ui.views.dashboard_view import ProfessionalDashboardView as DashboardView
 from ui.views.website_scanner_view import ProfessionalScannerView as WebsiteScannerView
-from ui.views.company_scanner_view import ProfessionalCompanyScannerView as CompanyScannerView
+from ui.views.company_scanner_view import init_company_scanner
 from ui.views.results_view import ResultsView
 from ui.views.reports_view import ReportsView
 from ui.views.settings_view import SettingsView, load_settings
 from ui.views.profile_view import ProfileView
-from ui.views.live_defense_view import LiveDefenseView
-from ui.views.pentest_view import PentestView
 from ui.widgets import NavButton
 
+# Main navigation — fills the middle flex-1 area
 NAV_ITEMS = [
-    # (view_key, icon, label) — a distinct glyph per item instead of the
-    # same "▣" repeated eight times, so the sidebar is actually scannable
-    # at a glance rather than relying on label text alone.
-    ("dashboard", "▦", "Dashboard"),
-    ("website_scanner", "◎", "Website Scanner"),
+    ("dashboard",       "▦", "Dashboard"),
     ("company_scanner", "◆", "Company Scanner"),
-    ("results", "▤", "Results"),
-    ("reports", "▥", "Reports"),
+    ("website_scanner", "◎", "Website Scanner"),
+    ("results",         "▤", "Results"),
+    ("reports",         "▥", "Reports"),
+]
+
+# Footer navigation — sits above the profile card
+NAV_FOOTER = [
     ("settings", "⚙", "Settings"),
-    ("profile", "◉", "Profile"),
-    ("live_defense", "⬡", "Live Defense"),
-    ("pentest",      "⚔", "AI PenTest"),
 ]
 
 QUICK_PRESETS = {
@@ -96,17 +93,19 @@ class BugBountyApp(ctk.CTk):
         self.minsize(1200, 800)
 
         # Root grid: sidebar (col 0) is fixed-width, content (col 1) must
-        # absorb all extra space on resize/maximize. Without weight on the
-        # ROOT window's own grid, every child's sticky="nsew" is a no-op —
-        # sticky only fills an already-expanded cell, it doesn't request the
-        # expansion itself. This was missing entirely, which is why content
-        # never grew past its natural minimum size on any page.
+        # absorb all extra space on resize/maximize. A single row with weight=1
+        # means both the sidebar and content frame fill the full window height
+        # without any gap or overflow. rowspan=1 on each child keeps them
+        # anchored to row 0 only, avoiding ghost rows that push content down.
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
         self.events = queue.Queue()
         self.scan_engine = ScanEngine(self.events)
+        from brain.autonomous_brain import brain as autonomous_brain
+        autonomous_brain.start(self.events)
+        self._autonomous_brain = autonomous_brain
         self.report_store = ReportStore()
 
         # Settings persisted from a previous session (config/settings.json)
@@ -126,71 +125,256 @@ class BugBountyApp(ctk.CTk):
         self._build_content()
 
         self._start_event_pump()
+        self._setup_tray()
+        self._setup_global_scroll()
+
+    # ------------------------------------------------------------------
+    # System tray (§7) — minimize to tray instead of quitting on close
+    # ------------------------------------------------------------------
+
+    def _setup_tray(self) -> None:
+        """Wire the window-close button to minimize to tray (not quit).
+
+        Uses pystray if available. If pystray or Pillow are absent, falls back
+        to normal close behaviour so the app always starts cleanly.
+        """
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+        except ImportError:
+            # pystray / Pillow not installed — close button quits normally
+            return
+
+        self._tray_icon = None
+        self._tray_running = False
+
+        def _make_icon_image(size: int = 64) -> "Image.Image":
+            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            # Simple circle with "H" for HydraX
+            draw.ellipse([4, 4, size - 4, size - 4], fill="#c41e3a")
+            font_size = size // 2
+            draw.text(
+                (size // 2, size // 2),
+                "H",
+                fill="white",
+                anchor="mm",
+            )
+            return img
+
+        def _show_window() -> None:
+            self.after(0, self.deiconify)
+            self.after(0, self.lift)
+            self.after(0, self.focus_force)
+
+        def _quit_app() -> None:
+            if self._tray_icon:
+                self._tray_icon.stop()
+            self.after(0, self.destroy)
+
+        def _build_tray_icon() -> None:
+            menu = pystray.Menu(
+                pystray.MenuItem("Show HydraX", _show_window, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", _quit_app),
+            )
+            img = _make_icon_image()
+            self._tray_icon = pystray.Icon(
+                "hydrax", img, "HydraX — running in background", menu
+            )
+            self._tray_running = True
+            self._tray_icon.run()   # blocks until .stop() is called
+
+        def _on_close() -> None:
+            """Minimize to tray instead of destroying the window."""
+            self.withdraw()
+            if not self._tray_running:
+                import threading as _threading
+                _threading.Thread(
+                    target=_build_tray_icon, daemon=True, name="hydrax-tray"
+                ).start()
+
+        self.protocol("WM_DELETE_WINDOW", _on_close)
+
+    def _setup_global_scroll(self) -> None:
+        """Route wheel events to the nearest CTkScrollableFrame ancestor.
+
+        CTkScrollableFrame only captures wheel events when the scrollbar itself
+        is hovered. This fix walks up the widget tree from whatever is under the
+        cursor and delegates the scroll to the first CTkScrollableFrame found,
+        letting every nested widget respond to two-finger / mouse-wheel scroll.
+
+        Handles Windows (<MouseWheel>), Linux (<Button-4>/<Button-5>), and
+        macOS (<MouseWheel> with different delta scaling) in one place.
+        """
+        import customtkinter as _ctk
+
+        def _find_scrollable(widget):
+            """Walk up the tree and return the first CTkScrollableFrame found."""
+            seen = set()
+            while widget is not None:
+                wid = id(widget)
+                if wid in seen:
+                    break
+                seen.add(wid)
+                if isinstance(widget, _ctk.CTkScrollableFrame):
+                    return widget
+                if isinstance(widget, _ctk.CTkTextbox):
+                    return None   # textbox handles its own scroll
+                try:
+                    widget = widget.master
+                except AttributeError:
+                    break
+            return None
+
+        def _on_wheel(event):
+            sf = _find_scrollable(event.widget)
+            if sf is None:
+                return
+            # Windows / macOS: event.delta in multiples of ±120
+            # Linux Button-4 = scroll up, Button-5 = scroll down
+            if event.num == 4:
+                units = -3
+            elif event.num == 5:
+                units = 3
+            else:
+                units = int(-1 * (event.delta / 120)) * 3
+            try:
+                sf._parent_canvas.yview_scroll(units, "units")
+            except Exception:
+                pass
+
+        self.bind_all("<MouseWheel>", _on_wheel, add="+")
+        # Linux X11 scroll events come as Button-4 / Button-5
+        self.bind_all("<Button-4>", _on_wheel, add="+")
+        self.bind_all("<Button-5>", _on_wheel, add="+")
 
     def _build_sidebar(self):
-        """Build the navigation sidebar — hard corners, lime accent."""
-        self.sidebar_frame = ctk.CTkFrame(
-            self,
-            width=280,
-            corner_radius=RADIUS_NONE,
+        """Float-UI sidebar: logo (h-20) → main nav (flex-1) → footer nav → profile card."""
+        sb = ctk.CTkFrame(
+            self, width=280, corner_radius=RADIUS_NONE,
             fg_color=SURFACE_MUTED,
-            border_width=BORDER_WIDTH_HAIRLINE if 'BORDER_WIDTH_HAIRLINE' in globals() else 1,
-            border_color=BORDER_HAIRLINE
+            border_width=BORDER_WIDTH_HAIRLINE,
+            border_color=BORDER_HAIRLINE,
         )
-        self.sidebar_frame.grid(row=0, column=0, rowspan=4, sticky="nsew")
-        self.sidebar_frame.grid_propagate(False)
-        self.sidebar_frame.grid_rowconfigure(len(NAV_ITEMS), weight=1)
+        sb.grid(row=0, column=0, sticky="nsew")
+        sb.grid_propagate(False)
+        sb.grid_columnconfigure(0, weight=1)
+        # Row 1 (main nav) fills all available vertical space
+        sb.grid_rowconfigure(1, weight=1)
+        self.sidebar_frame = sb
 
-        # App logo/title — monospace, lime accent
-        self.logo_label = ctk.CTkLabel(
-            self.sidebar_frame,
-            text="HYDRAX\nPROFESSIONAL",
+        # ── Logo area  (h-20 = ~80 px) ───────────────────────────────────
+        logo_row = ctk.CTkFrame(sb, fg_color="transparent", height=72, corner_radius=0)
+        logo_row.grid(row=0, column=0, sticky="ew", padx=SPACE_5, pady=(SPACE_5, SPACE_3))
+        logo_row.grid_propagate(False)
+        logo_row.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            logo_row, text="HydraX",
             font=ctk.CTkFont(*FONTS["brand"]),
-            text_color=TEXT_PRIMARY,
-            justify="left"
-        )
-        self.logo_label.grid(row=0, column=0, padx=SPACE_6, pady=(SPACE_6, SPACE_4), sticky="w")
+            text_color=BORDER_ACCENT, anchor="w",
+        ).grid(row=0, column=0, sticky="sw")
+        ctk.CTkLabel(
+            logo_row, text="PROFESSIONAL EDITION",
+            font=ctk.CTkFont(*FONTS["small"]),
+            text_color=TEXT_SECONDARY, anchor="w",
+        ).grid(row=1, column=0, sticky="nw", pady=(SPACE_1, 0))
 
-        # Navigation buttons — fixed-width icon column guarantees consistent
-        # icon/label alignment regardless of per-glyph font metrics.
+        # ── Main nav  (px-4, flex-1, scrollable) ─────────────────────────
+        nav_scroll = ctk.CTkScrollableFrame(
+            sb, fg_color="transparent", corner_radius=0,
+            scrollbar_button_color=SURFACE_STRONG,
+            scrollbar_button_hover_color=BORDER_HAIRLINE,
+        )
+        nav_scroll.grid(row=1, column=0, sticky="nsew", padx=SPACE_4, pady=0)
+        nav_scroll.grid_columnconfigure(0, weight=1)
+
         self.nav_buttons = {}
-        for i, (name, icon, label) in enumerate(NAV_ITEMS, start=1):
+        for name, icon, label in NAV_ITEMS:
             btn = NavButton(
-                self.sidebar_frame,
-                icon=icon,
-                text=label,
+                nav_scroll, icon=icon, text=label,
                 command=lambda n=name: self._switch_view(n),
             )
-            btn.grid(row=i, column=0, padx=SPACE_4, pady=SPACE_2, sticky="ew")
+            btn.pack(fill="x", pady=SPACE_1)
             self.nav_buttons[name] = btn
 
-        # Version info at bottom
-        self.version_label = ctk.CTkLabel(
-            self.sidebar_frame,
-            text=f"v{VERSION}",
+        # ── Footer separator ──────────────────────────────────────────────
+        ctk.CTkFrame(sb, height=1, fg_color=BORDER_HAIRLINE, corner_radius=0,
+                     ).grid(row=2, column=0, sticky="ew", padx=0)
+
+        # ── Footer nav items (Settings, …) ───────────────────────────────
+        footer = ctk.CTkFrame(sb, fg_color="transparent", corner_radius=0)
+        footer.grid(row=3, column=0, sticky="ew", padx=SPACE_4, pady=(SPACE_2, 0))
+        footer.grid_columnconfigure(0, weight=1)
+
+        for name, icon, label in NAV_FOOTER:
+            btn = NavButton(
+                footer, icon=icon, text=label,
+                command=lambda n=name: self._switch_view(n),
+            )
+            btn.pack(fill="x", pady=SPACE_1)
+            self.nav_buttons[name] = btn
+
+        # ── Profile card separator ────────────────────────────────────────
+        ctk.CTkFrame(sb, height=1, fg_color=BORDER_HAIRLINE, corner_radius=0,
+                     ).grid(row=4, column=0, sticky="ew", padx=0)
+
+        # ── Profile card  (py-4 px-4) ────────────────────────────────────
+        profile_card = ctk.CTkFrame(sb, fg_color="transparent", corner_radius=0)
+        profile_card.grid(row=5, column=0, sticky="ew", padx=SPACE_5, pady=SPACE_4)
+        profile_card.grid_columnconfigure(1, weight=1)
+
+        # Avatar circle — CTkLabel with fg_color + corner_radius renders as a circle badge
+        ctk.CTkLabel(
+            profile_card, text="HX",
+            font=ctk.CTkFont(*FONTS["body_bold"]),
+            text_color=TEXT_INVERSE,
+            fg_color=BORDER_ACCENT,
+            corner_radius=22, width=44, height=44,
+        ).grid(row=0, column=0, rowspan=2, padx=(0, SPACE_4), sticky="w")
+
+        ctk.CTkLabel(
+            profile_card, text="Security Analyst",
+            font=ctk.CTkFont(*FONTS["body_bold"]),
+            text_color=TEXT_PRIMARY, anchor="w",
+        ).grid(row=0, column=1, sticky="sw")
+
+        view_profile_btn = ctk.CTkButton(
+            profile_card, text="View profile",
             font=ctk.CTkFont(*FONTS["small"]),
-            text_color=TEXT_SECONDARY
+            text_color=TEXT_SECONDARY,
+            fg_color="transparent",
+            hover_color=SURFACE_STRONG,
+            corner_radius=RADIUS_XS,
+            height=18, anchor="w",
+            command=lambda: self._switch_view("profile"),
         )
-        self.version_label.grid(row=len(NAV_ITEMS)+1, column=0, pady=(SPACE_4, SPACE_6))
+        view_profile_btn.grid(row=1, column=1, sticky="nw")
+        # Also track profile in nav_buttons so it highlights when active
+        self.nav_buttons["profile"] = type(
+            "_ProfileProxy", (),
+            {"set_active": lambda self, a: view_profile_btn.configure(
+                text_color=BORDER_ACCENT if a else TEXT_SECONDARY
+            )}
+        )()
 
     def _build_content(self):
         """Build the main content area."""
         self.content_frame = ctk.CTkFrame(self, fg_color=SURFACE_BASE, corner_radius=RADIUS_NONE)
-        self.content_frame.grid(row=0, column=1, rowspan=4, sticky="nsew", padx=0, pady=0)
+        self.content_frame.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
         self.content_frame.grid_columnconfigure(0, weight=1)
         self.content_frame.grid_rowconfigure(0, weight=1)
 
         # Initialize views
         self.views = {
-            "dashboard": DashboardView(self.content_frame, self),
+            "dashboard":       DashboardView(self.content_frame, self),
+            "company_scanner": init_company_scanner(self.content_frame, self.events),
             "website_scanner": WebsiteScannerView(self.content_frame, self.events),
-            "company_scanner": CompanyScannerView(self.content_frame, self.events),
-            "results": ResultsView(self.content_frame, self),
-            "reports": ReportsView(self.content_frame, self),
-            "settings": SettingsView(self.content_frame, self),
-            "profile": ProfileView(self.content_frame, self),
-            "live_defense": LiveDefenseView(self.content_frame, self),
-            "pentest":      PentestView(self.content_frame, self),
+            "results":         ResultsView(self.content_frame, self),
+            "reports":         ReportsView(self.content_frame, self),
+            "settings":        SettingsView(self.content_frame, self),
+            "profile":         ProfileView(self.content_frame, self),
         }
 
         # Show dashboard by default
@@ -198,6 +382,9 @@ class BugBountyApp(ctk.CTk):
 
     def _switch_view(self, view_name: str):
         """Switch to the specified view."""
+        if view_name not in self.views:
+            return
+
         # Hide current view
         if self._current_view:
             self.views[self._current_view].grid_remove()
@@ -230,6 +417,9 @@ class BugBountyApp(ctk.CTk):
             while not self.events.empty():
                 event = self.events.get_nowait()
                 self._handle_event(event)
+                # Feed brain (ignores non-scan_complete events internally)
+                if hasattr(self, "_autonomous_brain"):
+                    self._autonomous_brain.feed(event)
         except queue.Empty:
             pass
 
@@ -248,21 +438,23 @@ class BugBountyApp(ctk.CTk):
         if event_type == "scan_complete":
             self.last_report_data = event[2] if len(event) > 2 else None
             self.scan_count += 1
-            # Switch to results view automatically
-            if self._current_view != "results":
-                self._switch_view("results")
-            else:
-                # Already on Results — _switch_view's refresh() won't fire
-                # for a page that's not being switched TO, so refresh it
-                # explicitly or it keeps showing stale/empty data.
-                self.views["results"].refresh()
+            # Don't steal focus from company scanner — it manages its own UI
+            if self._current_view != "company_scanner":
+                if self._current_view != "results":
+                    self._switch_view("results")
+                else:
+                    self.views["results"].refresh()
         elif event_type == "scan_error":
             # Show error in current view or dashboard
             pass
+        elif event_type == "brain_analysis_complete":
+            # Route enriched findings to company scanner's brain tab
+            if self._current_view == "company_scanner":
+                view = self.views.get("company_scanner")
+                if view and hasattr(view, "handle_brain_results"):
+                    view.handle_brain_results(event[1], event[2])
         elif event_type == "threat_update":
-            # Update threat feed in scanner view
-            if self._current_view == "scanner":
-                self.views["scanner"].handle_event(event)
+            pass
 
     # ------------------------------------------------------------------
     # Report / folder helpers used by the views

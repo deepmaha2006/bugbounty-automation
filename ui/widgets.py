@@ -557,9 +557,149 @@ class NavButton(ctk.CTkFrame):
         self.text_label.configure(text_color=color)
 
 
+class ScanChip(ctk.CTkFrame):
+    """
+    Animated scan-status chip — CallChip concept in CTk.
+
+    Shows: [icon] [scanner name]  [STATUS]  [elapsed time]
+
+    Status colours:
+      queued  → grey text on dark bg
+      running → amber text on dark amber bg
+      done    → green #22c55e on dark green bg
+      error   → red  #ef4444 on dark red   bg
+    """
+
+    _STATUS_COLORS = {
+        "queued":  ("#888888", "#1c1c1e"),
+        "running": ("#f59e0b", "#2a1f0a"),
+        "done":    ("#22c55e", "#0a200f"),
+        "error":   ("#ef4444", "#200a0a"),
+    }
+    _STATUS_LABELS = {
+        "queued":  "QUEUED",
+        "running": "RUNNING",
+        "done":    "DONE",
+        "error":   "ERROR",
+    }
+
+    def __init__(self, master, name: str, icon: str = "▶", **kwargs):
+        super().__init__(master, fg_color="#27272a", corner_radius=10, **kwargs)
+        import time as _time
+        self._time = _time
+        self.name = name
+        self._status = "queued"
+        self._start: Optional[float] = None
+        self._tick_id: Optional[str] = None
+
+        self.grid_columnconfigure(2, weight=1)
+
+        self._icon_lbl = ctk.CTkLabel(
+            self, text=icon, width=24,
+            font=ctk.CTkFont("Consolas", 14),
+            text_color="#888888", anchor="center",
+        )
+        self._icon_lbl.grid(row=0, column=0, padx=(SPACE_3, SPACE_2), pady=SPACE_3)
+
+        self._name_lbl = ctk.CTkLabel(
+            self, text=name,
+            font=ctk.CTkFont(*FONTS["small_bold"]),
+            text_color=TEXT_PRIMARY, anchor="w",
+        )
+        self._name_lbl.grid(row=0, column=1, padx=SPACE_2, sticky="w")
+
+        self._status_lbl = ctk.CTkLabel(
+            self, text="QUEUED",
+            font=ctk.CTkFont(*FONTS["small_bold"]),
+            text_color="#888888",
+            fg_color="#333333", corner_radius=4,
+            width=72, height=18,
+        )
+        self._status_lbl.grid(row=0, column=2, padx=SPACE_3, sticky="e")
+
+        self._timer_lbl = ctk.CTkLabel(
+            self, text="--",
+            font=ctk.CTkFont("Consolas", 11),
+            text_color="#888888", width=52, anchor="e",
+        )
+        self._timer_lbl.grid(row=0, column=3, padx=(SPACE_2, SPACE_3))
+
+    def set_running(self) -> None:
+        self._status = "running"
+        self._start = self._time.time()
+        self._apply_colors()
+        self._tick()
+
+    def set_done(self, findings: int = 0) -> None:
+        self._cancel_tick()
+        self._status = "done"
+        elapsed = self._time.time() - (self._start or self._time.time())
+        self._timer_lbl.configure(text=self._fmt(elapsed))
+        text_c, bg_c = self._STATUS_COLORS["done"]
+        self._status_lbl.configure(
+            text=f"DONE  {findings}", text_color=text_c, fg_color=bg_c
+        )
+        self._icon_lbl.configure(text_color=text_c)
+        self.configure(fg_color=bg_c)
+
+    def set_error(self, msg: str = "") -> None:
+        self._cancel_tick()
+        self._status = "error"
+        elapsed = self._time.time() - (self._start or self._time.time())
+        self._timer_lbl.configure(text=self._fmt(elapsed))
+        text_c, bg_c = self._STATUS_COLORS["error"]
+        self._status_lbl.configure(text="ERROR", text_color=text_c, fg_color=bg_c)
+        self._icon_lbl.configure(text_color=text_c)
+        self.configure(fg_color=bg_c)
+
+    def reset(self) -> None:
+        self._cancel_tick()
+        self._status = "queued"
+        self._start = None
+        self._timer_lbl.configure(text="--")
+        text_c, bg_c = self._STATUS_COLORS["queued"]
+        self._status_lbl.configure(
+            text="QUEUED", text_color=text_c, fg_color="#333333"
+        )
+        self._icon_lbl.configure(text_color=text_c)
+        self.configure(fg_color="#27272a")
+
+    def _tick(self) -> None:
+        if self._status != "running":
+            return
+        elapsed = self._time.time() - (self._start or self._time.time())
+        self._timer_lbl.configure(text=self._fmt(elapsed))
+        self._tick_id = self.after(200, self._tick)
+
+    def _cancel_tick(self) -> None:
+        if self._tick_id:
+            try:
+                self.after_cancel(self._tick_id)
+            except Exception:
+                pass
+            self._tick_id = None
+
+    def _apply_colors(self) -> None:
+        text_c, bg_c = self._STATUS_COLORS[self._status]
+        self.configure(fg_color=bg_c)
+        self._icon_lbl.configure(text_color=text_c)
+        self._status_lbl.configure(
+            text=self._STATUS_LABELS[self._status],
+            text_color=text_c, fg_color=bg_c
+        )
+
+    @staticmethod
+    def _fmt(secs: float) -> str:
+        if secs < 60:
+            return f"{secs:.1f}s"
+        m, s = divmod(int(secs), 60)
+        return f"{m}m{s:02d}s"
+
+
 # Export the enhanced widgets
 __all__ = [
     "MetricCard", "StatusIndicator", "PrimaryButton", "GhostButton",
     "SectionHeader", "Tag", "ThreatFeedWidget",
-    "Badge", "SeverityBadge", "EmptyState", "make_card", "NavButton"
+    "Badge", "SeverityBadge", "EmptyState", "make_card", "NavButton",
+    "ScanChip",
 ]

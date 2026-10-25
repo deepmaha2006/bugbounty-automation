@@ -284,10 +284,12 @@ class ScanEngine:
 
             final_report = supervisor.run()
 
+            total = final_report.total_findings
             self._put_event(("status",
-                f"Scan completed. Found {final_report.total_findings} vulnerabilities."))
+                f"Scan completed. Found {total} vulnerabilities."))
 
             # Save reports
+            report_dict = None
             try:
                 report_dict = final_report.to_dict()
                 report_path = self._get_report_store().save(report_dict, fmt="html")
@@ -296,6 +298,31 @@ class ScanEngine:
                 self._put_event(("report_saved", str(json_path)))
             except Exception as e:
                 self._put_event(("error", f"Failed to save report: {str(e)}", traceback.format_exc()))
+
+            # §7 multi-channel notifications
+            try:
+                from utils.notifications import notify
+                sev_counts = final_report.severity_counts
+                top_sev = "info"
+                for s in ("Critical", "High", "Medium", "Low"):
+                    if sev_counts.get(s, 0) > 0:
+                        top_sev = s.lower()
+                        break
+                if total:
+                    parts = [f"{v} {k}" for k, v in sev_counts.items() if v]
+                    notify(
+                        title=f"HydraX scan complete — {target_url}",
+                        message=f"{total} finding(s): {', '.join(parts)}",
+                        severity=top_sev,
+                    )
+                else:
+                    notify(
+                        title=f"HydraX scan complete — {target_url}",
+                        message="No vulnerabilities found.",
+                        severity="info",
+                    )
+            except Exception:
+                pass
 
             self._put_event(("scan_complete", target_url, final_report.to_dict()))
 

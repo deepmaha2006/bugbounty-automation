@@ -2,61 +2,95 @@
 Design tokens and theme configuration for the HydraX desktop interface.
 
 Uses the design the (since removed) web frontend used: a monochrome dark
-base, the fixed severity palette as the only saturated colour, gold as the
-accent, soft 6-8px corners, a sans body font and a monospace face for
+base, the fixed severity palette as the only saturated colour, cyber red as
+the accent, soft 6-8px corners, a sans body font and a monospace face for
 numbers. Views import these names directly, so changing a value here
 restyles every view.
 """
+from typing import Any, Dict
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # COLOR TOKENS — mirrors the web --bg-*/--line-*/--txt-*/--sev-* tokens
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Surface scale
-SURFACE_BASE = "#0b0b0b"      # App background        (web --dt-page)
-SURFACE_MUTED = "#121212"     # Cards, panels, inputs (web --dt-panel)
-SURFACE_RAISED = "#bda14a"    # Primary accent surface (web --accent, gold)
-SURFACE_STRONG = "#1d1d1d"    # Hover/active rows
+# Surface scale — cyber red / SOC terminal palette
+SURFACE_BASE = "#080b0f"      # Deep black — terminal background
+SURFACE_MUTED = "#0f1318"     # Cards, panels, inputs
+SURFACE_RAISED = "#c41e3a"    # Primary accent — cyber red
+SURFACE_STRONG = "#181e24"    # Hover/active rows
 
 # Border scale
-BORDER_HAIRLINE = "#222222"   # Dividers, card outlines (web --dt-line)
-BORDER_ACCENT = "#bda14a"     # Focus rings, active borders (gold)
+BORDER_HAIRLINE = "#1c2530"   # Dividers, card outlines
+BORDER_ACCENT = "#c41e3a"     # Focus rings, active borders (red)
 
 # Text scale
-TEXT_PRIMARY = "#f2f2f2"      # Headlines, body
-TEXT_SECONDARY = "#a8a8a8"    # Supporting copy
-TEXT_TERTIARY = "#d4bc6a"     # Accent text, links, counts (light gold)
-TEXT_INVERSE = "#0b0b0b"      # Text on accent surfaces
+TEXT_PRIMARY = "#e8edf2"      # Headlines, body
+TEXT_SECONDARY = "#8fa0b0"    # Supporting copy
+TEXT_TERTIARY = "#ff5a6e"     # Accent text, links, counts (threat red)
+TEXT_INVERSE = "#0f1318"      # Text on accent surfaces
 
-# Status / Severity — the fixed web severity palette
-STATUS_CRITICAL = "#d14b4b"
-STATUS_HIGH = "#cf7f2e"
-STATUS_MEDIUM = "#bda14a"
-STATUS_LOW = "#7f97ad"
-STATUS_INFO = "#8f8f8f"
-STATUS_OK = "#6fae78"         # Success / ok (web --dt-green)
+# Status / Severity — spec-mandated SOC severity palette
+STATUS_CRITICAL = "#E5484D"   # Red — critical findings
+STATUS_HIGH     = "#FF8B3D"   # Orange — high findings
+STATUS_MEDIUM   = "#F5C518"   # Yellow — medium findings
+STATUS_LOW      = "#8B97A7"   # Gray/Blue — low / info
+STATUS_INFO     = "#8B97A7"   # Same as LOW
+STATUS_OK       = "#3DD68C"   # Green — success / clean
 
-# Severity colors for vulnerability findings
+# Severity colors for vulnerability findings — used everywhere in the UI
 SEVERITY_COLORS = {
     "Critical": STATUS_CRITICAL,
-    "High": STATUS_HIGH,
-    "Medium": STATUS_MEDIUM,
-    "Low": STATUS_LOW,
-    "Info": STATUS_INFO,
+    "High":     STATUS_HIGH,
+    "Medium":   STATUS_MEDIUM,
+    "Low":      STATUS_LOW,
+    "Info":     STATUS_INFO,
+    # lowercase aliases so callers don't need to title-case
+    "critical": STATUS_CRITICAL,
+    "high":     STATUS_HIGH,
+    "medium":   STATUS_MEDIUM,
+    "low":      STATUS_LOW,
+    "info":     STATUS_INFO,
 }
+
+# Severity order for live defense gauge and priority ordering
+SEVERITY_ORDER = ["Critical", "High", "Medium", "Low", "Info"]
+
+# Status chip colors — STANDBY/CONNECTED/SCANNING/PAUSED/ERROR
+STATUS_CHIP_COLORS = {
+    "STANDBY":   ("#8B97A7", SURFACE_STRONG),    # gray text, dark bg
+    "CONNECTED": ("#3DD68C", "#0d2018"),          # green text, dark green bg
+    "SCANNING":  ("#3DD68C", "#0d2018"),          # animated green pulse
+    "PAUSED":    ("#F5C518", "#201a04"),          # yellow text
+    "ERROR":     ("#E5484D", "#280d0e"),          # red text
+}
+
+STATUS_RUNNING_COLOR = "#3DD68C"   # animated pulse color when scanning
+
+# Pulse animation configuration for real-time indicators
+def pulse_animation_config() -> Dict[str, Any]:
+    """Return pulse animation parameters for live defense view."""
+    return {
+        "enabled": True,
+        "interval_ms": 1000,          # Pulse cycle time
+        "opacity_range": (0.5, 1.0),  # Min/max alpha for pulse
+        "critical_speed_ms": 500,     # Faster pulse for critical
+        "high_speed_ms": 800,         # High severity pulse
+        "medium_speed_ms": 1200,      # Medium severity pulse
+        "low_speed_ms": 2000,         # Slow pulse for low
+    }
 
 # Row tints for the scanner grid (web .is-bad / .is-good, pre-blended on
 # SURFACE_MUTED because Tk has no alpha)
-ROW_BAD = "#1f1414"
-ROW_GOOD = "#151c16"
+ROW_BAD = "#1a0c0f"
+ROW_GOOD = "#0d1710"
 
 # Status indicator colors (for StatusIndicator widget)
 STATUS_COLORS = {
-    "idle": TEXT_SECONDARY,
-    "active": TEXT_TERTIARY,
+    "idle":    TEXT_SECONDARY,
+    "active":  STATUS_RUNNING_COLOR,
     "success": STATUS_OK,
     "warning": STATUS_HIGH,
-    "error": STATUS_CRITICAL,
+    "error":   STATUS_CRITICAL,
 }
 
 # Profile page accent (web .profile-pro tokens)
@@ -125,6 +159,8 @@ SPACE_5 = 16
 SPACE_6 = 20
 SPACE_7 = 28
 SPACE_8 = 40
+SPACE_9 = 50
+SPACE_10 = 60
 
 # Semantic spacing aliases
 SPACE_XS = SPACE_1
@@ -186,8 +222,17 @@ SURFACE = SURFACE_MUTED
 SURFACE_ALT = SURFACE_STRONG
 BORDER = BORDER_HAIRLINE
 ACCENT = SURFACE_RAISED
-ACCENT_HOVER = "#cdb25c"   # lighter gold for hover
-ACCENT_DARK = "#9c843a"    # darker gold for pressed
+ACCENT_HOVER = "#e02040"   # brighter red for hover
+ACCENT_DARK = "#9c1630"    # darker red for pressed
+
+# Severity row tint helpers — pre-blended on SURFACE_MUTED (Tk has no alpha)
+SEV_ROW = {
+    "critical": "#210a0b",
+    "high":     "#1f100a",
+    "medium":   "#1a1502",
+    "low":      "#0d1014",
+    "info":     "#0d1014",
+}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # THEME APPLICATION

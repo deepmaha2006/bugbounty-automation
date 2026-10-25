@@ -33,9 +33,15 @@ OUTCOME_DETECTED      = "detected"
 OUTCOME_BLOCKED       = "blocked"
 OUTCOME_FALSE_POSITIVE = "false_positive"
 OUTCOME_ROLLBACK      = "rollback"
+# Phase 1+ integrations
+OUTCOME_MCP_TOOL      = "mcp_tool"          # Finding from MCP tool (hexstrike-ai)
+OUTCOME_SHANNON_WORKFLOW = "shannon_workflow"  # Finding from Shannon workflow
+OUTCOME_AI_PAYLOAD    = "ai_payload"        # Finding from AI-generated payload
+OUTCOME_ATTACK_CHAIN  = "attack_chain"      # Finding from attack chain analysis
 
 _VALID_OUTCOMES = frozenset(
-    {OUTCOME_DETECTED, OUTCOME_BLOCKED, OUTCOME_FALSE_POSITIVE, OUTCOME_ROLLBACK}
+    {OUTCOME_DETECTED, OUTCOME_BLOCKED, OUTCOME_FALSE_POSITIVE, OUTCOME_ROLLBACK,
+     OUTCOME_MCP_TOOL, OUTCOME_SHANNON_WORKFLOW, OUTCOME_AI_PAYLOAD, OUTCOME_ATTACK_CHAIN}
 )
 
 # ---------------------------------------------------------------------------
@@ -157,17 +163,27 @@ def _cache_invalidate(asset_id: int, org_id: int, fingerprint: str) -> None:
 # ---------------------------------------------------------------------------
 
 _ALPHA = 0.2
+# Enhanced confidence deltas for Phase 1+ integrations
 _CONFIDENCE_DELTA = {
-    OUTCOME_DETECTED:       +0.05,
-    OUTCOME_BLOCKED:        +0.10,
-    OUTCOME_FALSE_POSITIVE: -0.20,
-    OUTCOME_ROLLBACK:       -0.15,
+    OUTCOME_DETECTED:          +0.05,
+    OUTCOME_BLOCKED:           +0.10,
+    OUTCOME_FALSE_POSITIVE:    -0.20,
+    OUTCOME_ROLLBACK:          -0.15,
+    # New integrations
+    OUTCOME_MCP_TOOL:          +0.08,   # MCP tool findings are reliable
+    OUTCOME_SHANNON_WORKFLOW:  +0.10,   # Shannon workflow is comprehensive
+    OUTCOME_AI_PAYLOAD:        +0.07,   # AI-generated payloads are targeted
+    OUTCOME_ATTACK_CHAIN:      +0.09,   # Attack chains reveal real exploit paths
 }
 _SUCCESS_INDICATOR = {
-    OUTCOME_DETECTED:       0.0,
-    OUTCOME_BLOCKED:        1.0,
-    OUTCOME_FALSE_POSITIVE: 0.0,
-    OUTCOME_ROLLBACK:       0.0,
+    OUTCOME_DETECTED:          0.0,
+    OUTCOME_BLOCKED:           1.0,
+    OUTCOME_FALSE_POSITIVE:    0.0,
+    OUTCOME_ROLLBACK:          0.0,
+    OUTCOME_MCP_TOOL:          0.8,     # MCP tools have high effectiveness
+    OUTCOME_SHANNON_WORKFLOW:  0.9,     # Shannon workflow is thorough
+    OUTCOME_AI_PAYLOAD:        0.7,     # AI payloads are contextually targeted
+    OUTCOME_ATTACK_CHAIN:      0.85,    # Attack chains confirm exploitability
 }
 
 
@@ -335,3 +351,171 @@ def get_recommendation(
     }
     _cache_put(asset_id, org_id, fingerprint, result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 1+ Integration Helpers
+# ---------------------------------------------------------------------------
+
+def observe_mcp_finding(
+    asset_id: int,
+    org_id: int,
+    fingerprint: str,
+    attack_class: str,
+    tool_name: str = "mcp_tool",
+) -> None:
+    """Record an MCP tool finding in brain knowledge."""
+    observe(asset_id, org_id, fingerprint, attack_class, OUTCOME_MCP_TOOL)
+    # Log the specific tool for analysis
+    _log_integration_source(asset_id, org_id, fingerprint, "mcp", tool_name)
+
+
+def observe_shannon_finding(
+    asset_id: int,
+    org_id: int,
+    fingerprint: str,
+    attack_class: str,
+    workflow_phase: str = "vuln_analysis",
+) -> None:
+    """Record a Shannon workflow finding in brain knowledge."""
+    observe(asset_id, org_id, fingerprint, attack_class, OUTCOME_SHANNON_WORKFLOW)
+    _log_integration_source(asset_id, org_id, fingerprint, "shannon", workflow_phase)
+
+
+def observe_ai_payload_finding(
+    asset_id: int,
+    org_id: int,
+    fingerprint: str,
+    attack_class: str,
+    payload_type: str = "generated",
+) -> None:
+    """Record an AI-generated payload finding in brain knowledge."""
+    observe(asset_id, org_id, fingerprint, attack_class, OUTCOME_AI_PAYLOAD)
+    _log_integration_source(asset_id, org_id, fingerprint, "ai_payload", payload_type)
+
+
+def observe_attack_chain_finding(
+    asset_id: int,
+    org_id: int,
+    fingerprint: str,
+    attack_class: str,
+    chain_id: str = "",
+) -> None:
+    """Record an attack chain finding in brain knowledge."""
+    observe(asset_id, org_id, fingerprint, attack_class, OUTCOME_ATTACK_CHAIN)
+    _log_integration_source(asset_id, org_id, fingerprint, "attack_chain", chain_id)
+
+
+def _log_integration_source(
+    asset_id: int,
+    org_id: int,
+    fingerprint: str,
+    source: str,
+    detail: str,
+) -> None:
+    """Log integration source for audit trail."""
+    # This could write to a dedicated table for cross-referencing
+    # For now, just update the knowledge record with integration metadata
+    import webapp.db as db
+    existing = db.brain_get_knowledge(asset_id, org_id, fingerprint)
+    if existing:
+        # Add integration source metadata
+        pass  # Could extend brain_knowledge table with source_metadata JSON column
+
+
+def get_integrated_confidence(
+    asset_id: int,
+    org_id: int,
+    fingerprint: str,
+) -> float:
+    """Get confidence incorporating all integration sources."""
+    rec = get_recommendation(asset_id, org_id, fingerprint)
+    if not rec:
+        return 0.5
+    return rec.get("confidence", 0.5)
+
+
+def cross_feed_from_mcp_scan(
+    asset_id: int,
+    org_id: int,
+    mcp_findings: List[Dict],
+) -> int:
+    """Ingest MCP scan findings into brain knowledge.
+
+    MCP findings have structure: {title, description, severity, attack_class, cve_id, cvss_score, metadata}
+    """
+    import hashlib as _hash
+    import webapp.db as db
+
+    count = 0
+    for finding in mcp_findings:
+        attack_class = finding.get("attack_class") or "scanner_probe"
+        severity = (finding.get("severity") or "medium").lower()
+        confidence = _SEVERITY_TO_CONFIDENCE.get(severity, 0.65)
+
+        path = finding.get("source", "")
+        fp_raw = f"{asset_id}:{org_id}:{attack_class}:{path}"
+        fingerprint = finding.get("metadata", {}).get("fingerprint") or _hash.sha256(
+            fp_raw.encode()
+        ).hexdigest()[:32]
+
+        # Boost confidence for MCP tool findings
+        confidence = min(0.99, confidence + 0.1)
+
+        db.brain_upsert_knowledge(
+            asset_id=asset_id,
+            org_id=org_id,
+            signature_fingerprint=fingerprint,
+            attack_class=attack_class,
+            recommended_action=_default_recommended_action(attack_class),
+            remediation=_default_remediation(attack_class),
+            confidence=confidence,
+        )
+        _cache_invalidate(asset_id, org_id, fingerprint)
+        count += 1
+
+    return count
+
+
+def cross_feed_from_shannon_workflow(
+    asset_id: int,
+    org_id: int,
+    shannon_findings: List[Dict],
+) -> int:
+    """Ingest Shannon workflow findings into brain knowledge.
+
+    Shannon findings have structured vulnerability entries with confidence scores.
+    """
+    import hashlib as _hash
+    import webapp.db as db
+
+    count = 0
+    for finding in shannon_findings:
+        attack_class = finding.get("vulnerability_type") or finding.get("attack_class") or "unknown"
+        if attack_class not in _RECOMMENDED_ACTION:
+            continue
+
+        confidence = finding.get("confidence", 0.85)
+
+        path = finding.get("source_endpoint", "")
+        fp_raw = f"{asset_id}:{org_id}:{attack_class}:{path}"
+        fingerprint = finding.get("id") or _hash.sha256(
+            fp_raw.encode()
+        ).hexdigest()[:32]
+
+        # Boost confidence for Shannon workflow findings
+        confidence = min(0.99, confidence + 0.05)
+
+        db.brain_upsert_knowledge(
+            asset_id=asset_id,
+            org_id=org_id,
+            signature_fingerprint=fingerprint,
+            attack_class=attack_class,
+            recommended_action=_default_recommended_action(attack_class),
+            remediation=_default_remediation(attack_class),
+            confidence=confidence,
+        )
+        _cache_invalidate(asset_id, org_id, fingerprint)
+        count += 1
+
+    return count

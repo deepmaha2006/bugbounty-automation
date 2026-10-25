@@ -212,7 +212,8 @@ class ProfessionalScannerView(ctk.CTkFrame):
             text="START SCAN",
             command=self._start_scan,
             width=BTN_WIDTH_MD,
-            height=BTN_HEIGHT_MD
+            height=BTN_HEIGHT_MD,
+            state="disabled",   # enabled only after auth checkbox
         )
         self.scan_button.grid(row=0, column=0, padx=(0, SPACE_3))
 
@@ -225,6 +226,31 @@ class ProfessionalScannerView(ctk.CTkFrame):
             state="disabled"
         )
         self.stop_button.grid(row=0, column=1)
+
+        # §3/§4 mandatory authorization gate — every scan needs explicit consent
+        self._auth_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            target_frame,
+            text="I authorize this scan against the target above",
+            variable=self._auth_var,
+            command=self._update_scan_btn_state,
+            font=ctk.CTkFont(*FONTS["small"]),
+            text_color=TEXT_SECONDARY,
+            border_color=BORDER_HAIRLINE,
+            checkmark_color=TEXT_INVERSE,
+            hover_color=BORDER_ACCENT,
+        ).grid(row=3, column=0, columnspan=4, sticky="w",
+               padx=(CARD_PADDING, 0), pady=(SPACE_2, 0))
+
+        # Parallelism hint
+        ctk.CTkLabel(
+            target_frame,
+            text="Runs up to 8 scanners in parallel across discovered endpoints",
+            font=ctk.CTkFont(*FONTS["small"]),
+            text_color=TEXT_TERTIARY,
+            anchor="w",
+        ).grid(row=4, column=0, columnspan=4, sticky="w",
+               padx=(CARD_PADDING, 0), pady=(SPACE_1, CARD_PADDING))
 
     def _create_metrics_dashboard(self):
         """Create real-time metrics dashboard — 4 severity cards."""
@@ -483,8 +509,18 @@ class ProfessionalScannerView(ctk.CTkFrame):
             text = f"Active: {shown}{more}  ({n}/{total})"
         self.scanner_summary_label.configure(text=text)
 
+    def _update_scan_btn_state(self) -> None:
+        """Enable START SCAN only when the authorization checkbox is ticked."""
+        state = "normal" if self._auth_var.get() else "disabled"
+        self.scan_button.configure(state=state)
+
     def _start_scan(self):
         """Start the security assessment scan."""
+        # Mandatory authorization gate (spec requirement)
+        if not getattr(self, "_auth_var", None) or not self._auth_var.get():
+            self._show_error("You must check 'I authorize this scan' before starting.")
+            return
+
         target = self.target_entry.get().strip()
         if not target:
             self._show_error("Please enter a target URL")
@@ -509,11 +545,26 @@ class ProfessionalScannerView(ctk.CTkFrame):
 
         # Reset metrics and HUD
         self._reset_metrics()
-        self._render_scanner_activity_empty()
         self._agents_done = 0
         self._radar.reset()
         self._xp_bar.reset()
         self.threat_widget.clear()
+
+        # Pre-populate activity panel with all enabled modules in QUEUED state
+        # so the panel is never empty while the engine starts up.
+        roster = [
+            (k, SCANNER_META[k]["name"])
+            for k in self.enabled_scanners
+            if k in SCANNER_META
+        ]
+        if roster:
+            self._init_scanner_activity(roster)
+            self._radar.update_progress(0, len(roster))
+            self._radar.start_sweep()
+            for k, _ in roster:
+                self._set_scanner_status(k, "queued")
+        else:
+            self._render_scanner_activity_empty()
 
         # Start scan in background thread
         self.scan_start_time = datetime.now()
@@ -558,15 +609,21 @@ class ProfessionalScannerView(ctk.CTkFrame):
     def _scan_complete(self, total_findings: Optional[int] = None):
         """Handle scan completion."""
         self.is_scanning = False
-        self.scan_button.configure(state="normal")
+        # Reset auth gate — next scan requires fresh consent
+        if hasattr(self, "_auth_var"):
+            self._auth_var.set(False)
+        self.scan_button.configure(state="disabled")
         self.stop_button.configure(state="disabled")
         self.status_indicator.update_status("SCAN COMPLETE", "success")
         self.export_button.configure(state="normal")
         self.clear_button.configure(state="normal")
 
         self._radar.stop_sweep()
-        scan_duration = datetime.now() - self.scan_start_time
-        duration_text = f"{scan_duration.seconds//60}m {scan_duration.seconds%60}s"
+        if self.scan_start_time:
+            scan_duration = datetime.now() - self.scan_start_time
+            duration_text = f"{scan_duration.seconds//60}m {scan_duration.seconds%60}s"
+        else:
+            duration_text = "N/A"
         if total_findings is not None:
             self._add_threat_feed_item(
                 f"Security assessment completed in {duration_text} — {total_findings} vulnerabilities found"
@@ -657,10 +714,13 @@ class ProfessionalScannerView(ctk.CTkFrame):
         elif event_type == "error":
             self._scan_error(event[1] if len(event) > 1 else "Unknown error")
         elif event_type == "scanners_queued":
+            # Only re-init if the engine roster differs from the pre-populated
+            # one (e.g. AgentSupervisor filtered out unavailable scanners).
             roster = event[1]
-            self._init_scanner_activity(roster)
-            self._radar.update_progress(0, len(roster))
-            self._radar.start_sweep()
+            if set(k for k, _ in roster) != set(self.scanner_rows.keys()):
+                self._init_scanner_activity(roster)
+                self._radar.update_progress(0, len(roster))
+                self._radar.start_sweep()
         elif event_type == "scanner_start":
             _, key, name = event
             self._set_scanner_status(key, "running")

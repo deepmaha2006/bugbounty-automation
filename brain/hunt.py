@@ -1,9 +1,9 @@
 """
-HydraBrain bounded autonomous hunt loop — Phase 18.
+HydraBrain bounded autonomous hunt loop — Phase 18+.
 
 run_hunt(asset_id, org_id, ...) polls brain_events, runs the full
-detect → correlate → decide → apply → observe pipeline in a loop
-bounded by max_iterations and max_seconds.
+detect → correlate → cve_match → decide → apply → auto_fix → observe pipeline
+in a loop bounded by max_iterations and max_seconds.
 
 Stopped reasons:
   "no_new_events"   — poll returned nothing new; loop is idle
@@ -57,6 +57,7 @@ class HuntReport:
     total_campaigns:       int
     total_proposals:       int
     total_actions_applied: int
+    total_auto_fixes:      int
     total_learn_updates:   int
     elapsed_seconds:       float
     stopped_reason:        str   # see module docstring for valid values
@@ -127,6 +128,7 @@ def run_hunt(
         total_campaigns=0,
         total_proposals=0,
         total_actions_applied=0,
+        total_auto_fixes=0,
         total_learn_updates=0,
         elapsed_seconds=0.0,
         stopped_reason="no_new_events",
@@ -172,7 +174,7 @@ def run_hunt(
         report.total_events_processed += len(events)
         report.iterations += 1
 
-        # --- detect ---
+        # --- detect (includes CVE matching) ---
         try:
             detections = detect(asset_id, org_id, events)
         except AuthorizationError:
@@ -183,6 +185,27 @@ def run_hunt(
         # --- correlate (informational; logged in report) ---
         campaigns = correlate(detections)
         report.total_campaigns += len(campaigns)
+
+        # --- cve_match & auto_fix ---
+        # For detections with high-confidence CVE matches, apply known fixes
+        auto_fixes_applied = 0
+        for det in detections:
+            if det.cve_confidence >= 0.85 and det.cve_matches:
+                # Try to apply autonomous fix
+                try:
+                    from brain.autonomous_fixer import apply_fixes_for_detection
+                    applied = apply_fixes_for_detection(
+                        asset_id, org_id, det,
+                        [{"cve_id": cve_id, "fix_recommendation": {}} for cve_id in det.cve_matches],
+                        max_fixes=1
+                    )
+                    auto_fixes_applied += len(applied)
+                except Exception as e:
+                    # Log but don't fail the hunt
+                    import logging
+                    logging.getLogger(__name__).warning(f"Auto-fix failed: {e}")
+
+        report.total_auto_fixes += auto_fixes_applied
 
         # --- decide ---
         proposals = decide(asset_id, org_id, detections)
@@ -198,7 +221,7 @@ def run_hunt(
         # --- observe (learning feedback) ---
         # Determine best outcome: 'applied' on any action → BLOCKED
         best_outcome = OUTCOME_DETECTED
-        if action_ids:
+        if action_ids or auto_fixes_applied > 0:
             for aid in action_ids:
                 try:
                     row = db.brain_get_action(aid, org_id) or {}
